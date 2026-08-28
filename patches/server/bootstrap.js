@@ -1,7 +1,7 @@
 import express from "express";
 import { createServer as createHTTPServer } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
-import { open } from "fs/promises";
+import { open, readFile } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname as getHostname } from "node:os";
 import path from "node:path";
@@ -11,6 +11,8 @@ import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js
 import { createCodexConfigRouteHandlers } from "./codex-config.js";
 import { createPaseoManagementRouteHandlers } from "./paseo-management.js";
 import { startCodexChatProxy, stopCodexChatProxy } from "./codex-chat-proxy.js";
+import { preparePiProviderOverrides } from "./paseo-pi-model-config.js";
+import { prepareProviderOverridesForRuntime } from "./paseo-provider-config.js";
 function resolveBoundListenTarget(listenTarget, httpServer) {
     if (listenTarget.type !== "tcp") {
         return listenTarget;
@@ -281,7 +283,7 @@ function resolveExpressTrustProxySetting(config) {
     return config.trustedProxies ?? ["loopback"];
 }
 function createInitialMutableDaemonConfig(config) {
-    const providers = Object.fromEntries(Object.entries(config.providerOverrides ?? {}).map(([providerId, override]) => {
+    const providers = Object.fromEntries(Object.entries(prepareProviderOverridesForRuntime(config.providerOverrides ?? {})).map(([providerId, override]) => {
         const providerConfig = {};
         if (override.enabled !== undefined) {
             providerConfig.enabled = override.enabled;
@@ -308,9 +310,31 @@ function createInitialMutableDaemonConfig(config) {
     }
     return initialConfig;
 }
+async function readBaseSystemPrompt(filePath, logger) {
+    if (typeof filePath !== "string" || !filePath.trim()) return "";
+    try {
+        return (await readFile(filePath, "utf8")).trim();
+    }
+    catch (error) {
+        logger.warn({ err: error, filePath }, "Unable to read the base Agent environment prompt");
+        return "";
+    }
+}
+function combineAgentSystemPrompt(baseSystemPrompt, appendSystemPrompt) {
+    return [baseSystemPrompt, appendSystemPrompt]
+        .map((value) => typeof value === "string" ? value.trim() : "")
+        .filter(Boolean)
+        .join("\n\n");
+}
 export async function createPaseoDaemon(config, rootLogger, dependencies = {}) {
     configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
     const logger = rootLogger.child({ module: "bootstrap" });
+    const baseSystemPrompt = await readBaseSystemPrompt(
+        process.env.PASEO_BASE_SYSTEM_PROMPT_FILE, logger);
+    config = {
+        ...config,
+        providerOverrides: await preparePiProviderOverrides(config.paseoHome, config.providerOverrides ?? {}),
+    };
     const bootstrapStart = performance.now();
     const elapsed = () => `${(performance.now() - bootstrapStart).toFixed(0)}ms`;
     const daemonVersion = config.daemonVersion ?? resolveDaemonVersion(import.meta.url);
@@ -550,7 +574,7 @@ export async function createPaseoDaemon(config, rootLogger, dependencies = {}) {
     const providerSnapshotManager = new ProviderSnapshotManager({
         logger: providerSnapshotLogger,
         runtimeSettings: config.agentProviderSettings,
-        providerOverrides: config.providerOverrides,
+        providerOverrides: prepareProviderOverridesForRuntime(config.providerOverrides ?? {}),
         workspaceGitService,
         managedProcesses,
         isDev: config.isDev === true,
@@ -561,7 +585,7 @@ export async function createPaseoDaemon(config, rootLogger, dependencies = {}) {
         clients: initialAgentManagerState.clients,
         providerDefinitions: initialAgentManagerState.providerDefinitions,
         registry: agentStorage,
-        appendSystemPrompt: config.appendSystemPrompt,
+        appendSystemPrompt: combineAgentSystemPrompt(baseSystemPrompt, config.appendSystemPrompt),
         onWorkspaceStateMayHaveChanged: ({ cwd }) => {
             workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
         },
@@ -574,6 +598,14 @@ export async function createPaseoDaemon(config, rootLogger, dependencies = {}) {
         serverId,
         logger,
         paseoHome: config.paseoHome,
+        // Exposed read-only so the console can show users what the built-in environment
+        // prompt already tells every Agent, and that their own text is appended to it.
+        baseSystemPrompt,
+        platform: process.env.PASEO_STANDALONE_ANDROID === "1" ? "android" : process.platform,
+        mcpServiceEnabled: config.mcpEnabled !== false,
+        ...(typeof process.env.PREFIX === "string" && process.env.PREFIX.trim()
+            ? { cliSourceRoot: process.env.PREFIX }
+            : {}),
         daemonConfigStore,
         agentManager,
         agentStorage,
@@ -1115,7 +1147,8 @@ export async function createPaseoDaemon(config, rootLogger, dependencies = {}) {
                             agentManager.setPaseoToolsEnabled(value !== false);
                         });
                         daemonConfigStore.onFieldChange("appendSystemPrompt", (value) => {
-                            agentManager.setAppendSystemPrompt(typeof value === "string" ? value : "");
+                            agentManager.setAppendSystemPrompt(combineAgentSystemPrompt(
+                                baseSystemPrompt, typeof value === "string" ? value : ""));
                         });
                         const relayEnabled = config.relayEnabled ?? true;
                         const relayEndpoint = config.relayEndpoint ?? "relay.paseo.sh:443";

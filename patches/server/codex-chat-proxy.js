@@ -4,6 +4,16 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+import {
+    beginCodexRetryTrace,
+    finishCodexRetryTrace,
+    recordCodexRetryAttempt,
+    recordCodexRetryHttpFailure,
+    recordCodexRetryNetworkFailure,
+    recordCodexRetryStopped,
+    recordCodexRetrySuccess,
+    summarizeUpstreamResponse,
+} from "./codex-retry-status.js";
 
 const CHAT_PROXY_HOST = "127.0.0.1";
 const CHAT_PROXY_PORT = 6768;
@@ -18,6 +28,14 @@ const CODEX_REQUEST_HEADERS = new Set([
     "originator", "session-id", "thread-id", "x-client-request-id",
     "x-codex-turn-metadata", "x-codex-window-id",
 ]);
+const RETRYABLE_HTTP_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const DEFAULT_SQUEEZE_ATTEMPTS = 6;
+const MAX_SQUEEZE_ATTEMPTS = 50;
+const INITIAL_RETRY_DELAY_MS = 300;
+const MAX_RETRY_DELAY_MS = 10000;
+const MIN_RETRY_DELAY_MS = 100;
+const MAX_CONFIGURED_RETRY_DELAY_MS = 10000;
+const DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/paseo";
 let managedServer = null;
 
 function readActiveProfile() {
@@ -53,6 +71,10 @@ function normalizeResponsesEndpoint(baseUrl) {
     return `${normalizeApiRoot(baseUrl)}/responses`;
 }
 
+function normalizeResponsesCompactEndpoint(baseUrl) {
+    return `${normalizeApiRoot(baseUrl)}/responses/compact`;
+}
+
 function normalizeModelsEndpoint(baseUrl) {
     return `${normalizeApiRoot(baseUrl)}/models`;
 }
@@ -66,8 +88,33 @@ function squeezeRetryEnabled(profile) {
 }
 
 function canSqueezeRetry(status) {
-    const numeric = Number(status);
-    return numeric >= 400 && numeric <= 599;
+    return RETRYABLE_HTTP_STATUSES.has(Number(status));
+}
+
+function squeezeRetryLimit(profile) {
+    const attempts = Number(profile?.busyRetryAttempts);
+    return Number.isInteger(attempts) && attempts > 0 && attempts <= MAX_SQUEEZE_ATTEMPTS
+        ? attempts
+        : DEFAULT_SQUEEZE_ATTEMPTS;
+}
+
+function squeezeRetryBaseDelay(profile) {
+    const value = Number(profile?.busyRetryDelayMs);
+    return Number.isInteger(value) && value >= MIN_RETRY_DELAY_MS && value <= MAX_CONFIGURED_RETRY_DELAY_MS
+        ? value
+        : INITIAL_RETRY_DELAY_MS;
+}
+
+function squeezeRetryDelay(attempts, profile) {
+    return Math.min(squeezeRetryBaseDelay(profile) * (2 ** Math.max(0, attempts - 1)), MAX_RETRY_DELAY_MS);
+}
+
+function wait(milliseconds) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function isCancelledRequest(error) {
+    return error?.name === "AbortError";
 }
 
 function reloadSqueezeProfile(profileLoader, fallback) {
@@ -82,29 +129,90 @@ function reloadSqueezeProfile(profileLoader, fallback) {
 
 /* Retry at the same pace as the upstream request. The next profile read is
  * what makes the UI switch an in-flight loop off without killing the request. */
-async function fetchWithSqueezeRetry(invoke, profile, profileLoader) {
+export async function fetchWithSqueezeRetry(invoke, profile, profileLoader, options = {}) {
     let current = profile;
+    let reconnect = false;
+    let attempts = 0;
+    const sleep = typeof options.sleep === "function" ? options.sleep : wait;
     while (true) {
+        const stage = options.stage || "上游请求";
+        const endpoint = typeof options.endpoint === "function" ? options.endpoint(current) : options.endpoint;
+        const maxAttempts = squeezeRetryLimit(current);
+        attempts += 1;
+        recordCodexRetryAttempt(options.trace, { stage, endpoint, reconnect, maxAttempts });
         let response;
         try {
             response = await invoke(current);
         }
         catch (error) {
-            if (!squeezeRetryEnabled(current)) throw error;
+            if (!squeezeRetryEnabled(current) || isCancelledRequest(error)) {
+                recordCodexRetryNetworkFailure(options.trace, { stage, endpoint, error, willRetry: false });
+                if (squeezeRetryEnabled(current) && isCancelledRequest(error)) {
+                    recordCodexRetryStopped(options.trace, { reason: "请求已取消，不再重试" });
+                }
+                throw error;
+            }
             const next = reloadSqueezeProfile(profileLoader, current);
-            if (!squeezeRetryEnabled(next)) throw error;
-            current = next;
+            if (!squeezeRetryEnabled(next)) {
+                recordCodexRetryNetworkFailure(options.trace, { stage, endpoint, error, willRetry: false });
+                throw error;
+            }
+            const nextLimit = squeezeRetryLimit(next);
+            if (attempts >= nextLimit) {
+                recordCodexRetryNetworkFailure(options.trace, { stage, endpoint, error, willRetry: false });
+                recordCodexRetryStopped(options.trace, { reason: `已达到最多 ${nextLimit} 次尝试` });
+                throw error;
+            }
+            recordCodexRetryNetworkFailure(options.trace, { stage, endpoint, error, willRetry: true });
+            await sleep(squeezeRetryDelay(attempts, current));
+            const afterDelay = reloadSqueezeProfile(profileLoader, next);
+            if (!squeezeRetryEnabled(afterDelay)) {
+                recordCodexRetryNetworkFailure(options.trace, { stage, endpoint, error, willRetry: false });
+                recordCodexRetryStopped(options.trace, { reason: "挤入模式已关闭" });
+                throw error;
+            }
+            current = afterDelay;
+            reconnect = true;
             continue;
         }
-        if (response.ok || !canSqueezeRetry(response.status) || !squeezeRetryEnabled(current)) {
+        if (response.ok) {
+            recordCodexRetrySuccess(options.trace, { stage, endpoint, status: response.status });
+            return { response, profile: current };
+        }
+        const responseSummary = await summarizeUpstreamResponse(response);
+        if (!squeezeRetryEnabled(current)) {
+            recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: false });
+            return { response, profile: current };
+        }
+        if (!canSqueezeRetry(response.status)) {
+            recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: false });
+            if ([401, 403].includes(response.status)) {
+                recordCodexRetryStopped(options.trace, { reason: `HTTP ${response.status} 不可重试，请检查 API Key 和权限` });
+            }
             return { response, profile: current };
         }
         const next = reloadSqueezeProfile(profileLoader, current);
         if (!squeezeRetryEnabled(next)) {
+            recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: false });
+            return { response, profile: current };
+        }
+        const nextLimit = squeezeRetryLimit(next);
+        if (attempts >= nextLimit) {
+            recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: false });
+            recordCodexRetryStopped(options.trace, { reason: `已达到最多 ${nextLimit} 次尝试` });
+            return { response, profile: current };
+        }
+        recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: true });
+        await sleep(squeezeRetryDelay(attempts, current));
+        const afterDelay = reloadSqueezeProfile(profileLoader, next);
+        if (!squeezeRetryEnabled(afterDelay)) {
+            recordCodexRetryHttpFailure(options.trace, { stage, endpoint, status: response.status, response: responseSummary, willRetry: false });
+            recordCodexRetryStopped(options.trace, { reason: "挤入模式已关闭" });
             return { response, profile: current };
         }
         try { await response.arrayBuffer(); } catch { /* best effort drain before retry */ }
-        current = next;
+        current = afterDelay;
+        reconnect = true;
     }
 }
 
@@ -259,14 +367,16 @@ function translateTools(tools) {
     const chatTools = [];
     const responseNameByChatName = new Map();
     const chatNameByResponseName = new Map();
+    const responseTypeByChatName = new Map();
     const usedNames = new Set();
-    const addFunction = (tool, responseName, suggestedName) => {
+    const addFunction = (tool, responseName, suggestedName, responseType = "function") => {
         if (!tool || typeof tool !== "object") {
             return;
         }
         const chatName = safeToolName(suggestedName, usedNames);
         responseNameByChatName.set(chatName, responseName);
         chatNameByResponseName.set(responseName, chatName);
+        responseTypeByChatName.set(chatName, responseType);
         chatTools.push({
             type: "function",
             function: {
@@ -293,7 +403,7 @@ function translateTools(tools) {
                     required: ["input"],
                     additionalProperties: false,
                 },
-            }, tool.name, tool.name);
+            }, tool.name, tool.name, "custom");
             continue;
         }
         if (tool?.type === "namespace" && typeof tool.name === "string" && Array.isArray(tool.tools)) {
@@ -306,7 +416,7 @@ function translateTools(tools) {
             }
         }
     }
-    return { chatTools, responseNameByChatName, chatNameByResponseName };
+    return { chatTools, responseNameByChatName, chatNameByResponseName, responseTypeByChatName };
 }
 
 function appendToolCall(messages, item, chatNameByResponseName) {
@@ -429,6 +539,16 @@ function translateResponseFormat(text) {
     return undefined;
 }
 
+function translateToolChoice(choice, toolMapping) {
+    if (["auto", "none", "required"].includes(choice)) return choice;
+    if (!choice || typeof choice !== "object") return undefined;
+    const name = typeof choice.name === "string" ? choice.name : choice.function?.name;
+    if (!name) return undefined;
+    const chatName = toolMapping.chatNameByResponseName.get(name)
+        ?? name.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 64);
+    return { type: "function", function: { name: chatName } };
+}
+
 export function translateResponsesRequest(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
         throw new Error("Expected a Responses API request object");
@@ -440,13 +560,12 @@ export function translateResponsesRequest(body) {
     const payload = {
         model: body.model.trim(),
         messages: translateInput(body.input, toolMapping.chatNameByResponseName, body.instructions),
-        stream: false,
+        stream: body.stream === true,
     };
     if (toolMapping.chatTools.length) {
         payload.tools = toolMapping.chatTools;
-        if (["auto", "none", "required"].includes(body.tool_choice)) {
-            payload.tool_choice = body.tool_choice;
-        }
+        const toolChoice = translateToolChoice(body.tool_choice, toolMapping);
+        if (toolChoice !== undefined) payload.tool_choice = toolChoice;
         if (typeof body.parallel_tool_calls === "boolean") {
             payload.parallel_tool_calls = body.parallel_tool_calls;
         }
@@ -526,15 +645,34 @@ export function chatCompletionToResponse(chatCompletion, requestBody, toolMappin
     }
     for (const toolCall of normalizeChatToolCalls(message)) {
         const chatName = typeof toolCall?.function?.name === "string" ? toolCall.function.name : "tool";
+        const responseName = toolMapping.responseNameByChatName.get(chatName) ?? chatName;
+        const callId = typeof toolCall?.id === "string" && toolCall.id
+            ? toolCall.id
+            : `call_${randomUUID().replace(/-/gu, "")}`;
+        if (toolMapping.responseTypeByChatName.get(chatName) === "custom") {
+            let input = stringValue(toolCall?.function?.arguments || "");
+            try {
+                const parsed = JSON.parse(input);
+                if (typeof parsed?.input === "string") input = parsed.input;
+            }
+            catch { /* retain the raw custom tool input */ }
+            output.push({
+                id: `ctc_${randomUUID().replace(/-/gu, "")}`,
+                type: "custom_tool_call",
+                status: "completed",
+                call_id: callId,
+                name: responseName,
+                input,
+            });
+            continue;
+        }
         output.push({
             id: `fc_${randomUUID().replace(/-/gu, "")}`,
             type: "function_call",
             status: "completed",
             arguments: stringValue(toolCall?.function?.arguments || "{}"),
-            call_id: typeof toolCall?.id === "string" && toolCall.id
-                ? toolCall.id
-                : `call_${randomUUID().replace(/-/gu, "")}`,
-            name: toolMapping.responseNameByChatName.get(chatName) ?? chatName,
+            call_id: callId,
+            name: responseName,
         });
     }
     if (!output.length) {
@@ -546,6 +684,9 @@ export function chatCompletionToResponse(chatCompletion, requestBody, toolMappin
             content: [{ type: "output_text", text: "", annotations: [] }],
         });
     }
+    const incompleteReason = choice?.finish_reason === "length"
+        ? "max_output_tokens"
+        : choice?.finish_reason === "content_filter" ? "content_filter" : null;
     return {
         id: typeof chatCompletion?.id === "string" && chatCompletion.id
             ? chatCompletion.id.replace(/^chatcmpl-/u, "resp_")
@@ -554,7 +695,8 @@ export function chatCompletionToResponse(chatCompletion, requestBody, toolMappin
         created_at: Number.isFinite(chatCompletion?.created)
             ? chatCompletion.created
             : Math.floor(Date.now() / 1000),
-        status: "completed",
+        status: incompleteReason ? "incomplete" : "completed",
+        ...(incompleteReason ? { incomplete_details: { reason: incompleteReason } } : {}),
         model: typeof chatCompletion?.model === "string" ? chatCompletion.model : requestBody.model,
         output,
         usage: responseUsage(chatCompletion?.usage),
@@ -579,25 +721,27 @@ export function writeResponsesSse(res, response) {
         response: { ...response, status: "in_progress", output: [] },
     }, sequenceNumber++);
     response.output.forEach((item, outputIndex) => {
-        if (item.type === "function_call") {
+        if (item.type === "function_call" || item.type === "custom_tool_call") {
+            const custom = item.type === "custom_tool_call";
+            const input = custom ? item.input : item.arguments;
             writeSseEvent(res, {
                 type: "response.output_item.added",
                 output_index: outputIndex,
-                item: { ...item, status: "in_progress", arguments: "" },
+                item: { ...item, status: "in_progress", ...(custom ? { input: "" } : { arguments: "" }) },
             }, sequenceNumber++);
-            if (item.arguments) {
+            if (input) {
                 writeSseEvent(res, {
-                    type: "response.function_call_arguments.delta",
+                    type: custom ? "response.custom_tool_call_input.delta" : "response.function_call_arguments.delta",
                     item_id: item.id,
                     output_index: outputIndex,
-                    delta: item.arguments,
+                    delta: input,
                 }, sequenceNumber++);
             }
             writeSseEvent(res, {
-                type: "response.function_call_arguments.done",
+                type: custom ? "response.custom_tool_call_input.done" : "response.function_call_arguments.done",
                 item_id: item.id,
                 output_index: outputIndex,
-                arguments: item.arguments,
+                ...(custom ? { input } : { arguments: input }),
             }, sequenceNumber++);
             writeSseEvent(res, {
                 type: "response.output_item.done",
@@ -660,6 +804,23 @@ function codexRequestKind(req) {
     catch {
         return "turn";
     }
+}
+
+function codexCompatibleUserAgent(req) {
+    const value = String(req?.headers?.["user-agent"] || "").trim();
+    return /^codex_cli_rs(?:[\s/]|$)/iu.test(value) ? value : DEFAULT_CODEX_USER_AGENT;
+}
+
+function buildJsonApiHeaders(req, profile) {
+    const headers = {
+        accept: "application/json",
+        "content-type": "application/json",
+        "user-agent": codexCompatibleUserAgent(req),
+    };
+    if (typeof profile.apiKey === "string" && profile.apiKey.trim()) {
+        headers.authorization = `Bearer ${profile.apiKey.trim()}`;
+    }
+    return headers;
 }
 
 function buildUpstreamHeaders(req, profile, sanitized = false) {
@@ -760,6 +921,36 @@ function fetchNativeResponse(req, profile, body, fetchImpl, sanitized = false) {
     });
 }
 
+async function handleCompaction(req, res, profile, fetchImpl, profileLoader, logger) {
+    const rawBody = await readRawBody(req);
+    const requestBody = parseJsonBody(rawBody, req.headers["content-encoding"]);
+    const trace = beginCodexRetryTrace({ profileName: profile.name, requestKind: "compaction" });
+    try {
+        if (profile.wireApi === "chat") {
+            await respondThroughChat(req, res, profile, { ...requestBody, stream: false }, fetchImpl, profileLoader, trace);
+            finishCodexRetryTrace(trace, { outcome: "success", status: res.statusCode });
+            return;
+        }
+        const result = await fetchWithSqueezeRetry(
+            (currentProfile) => fetchImpl(normalizeResponsesCompactEndpoint(currentProfile.baseUrl), {
+                method: "POST",
+                headers: buildUpstreamHeaders(req, currentProfile),
+                body: JSON.stringify(requestBody),
+            }),
+            profile,
+            profileLoader,
+            { trace, stage: "Responses 压缩请求", endpoint: (currentProfile) => normalizeResponsesCompactEndpoint(currentProfile.baseUrl) },
+        );
+        await pipeUpstreamResponse(res, result.response);
+        finishCodexRetryTrace(trace, { outcome: "success", status: res.statusCode });
+    }
+    catch (error) {
+        finishCodexRetryTrace(trace, { outcome: "failed", error });
+        logger?.warn?.({ err: error }, "Responses compaction request failed");
+        throw error;
+    }
+}
+
 async function parseUpstreamJson(response) {
     const text = await response.text();
     let payload;
@@ -785,40 +976,440 @@ async function parseUpstreamJson(response) {
     return payload;
 }
 
-async function fetchChatCompletion(profile, payload, fetchImpl, profileLoader) {
-    const invoke = (requestPayload, currentProfile) => {
-        const headers = { "content-type": "application/json", accept: "application/json" };
-        if (typeof currentProfile.apiKey === "string" && currentProfile.apiKey.trim()) {
-            headers.authorization = `Bearer ${currentProfile.apiKey.trim()}`;
+function appendStreamFragment(current, fragment) {
+    if (typeof fragment !== "string" || !fragment) return current;
+    return `${current || ""}${fragment}`;
+}
+
+function chatSseEvents(text) {
+    const events = [];
+    for (const block of String(text || "").replace(/\r\n/gu, "\n").split(/\n{2,}/u)) {
+        const data = block.split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n")
+            .trim();
+        if (!data || data === "[DONE]") continue;
+        try {
+            events.push(JSON.parse(data));
         }
+        catch (error) {
+            throw Object.assign(new Error("Chat Completions upstream returned invalid SSE data"), {
+                status: 502,
+                details: data.slice(0, 2000),
+                cause: error,
+            });
+        }
+    }
+    return events;
+}
+
+function mergeStreamToolCalls(targetMessage, fragments) {
+    if (!Array.isArray(fragments)) return;
+    if (!Array.isArray(targetMessage.tool_calls)) targetMessage.tool_calls = [];
+    for (let position = 0; position < fragments.length; position += 1) {
+        const fragment = fragments[position];
+        if (!fragment || typeof fragment !== "object") continue;
+        const index = Number.isInteger(fragment.index) ? fragment.index : position;
+        const target = targetMessage.tool_calls[index] ?? {
+            id: "",
+            type: "function",
+            function: { name: "", arguments: "" },
+        };
+        if (typeof fragment.id === "string" && fragment.id) target.id = fragment.id;
+        if (typeof fragment.type === "string" && fragment.type) target.type = fragment.type;
+        if (fragment.function && typeof fragment.function === "object") {
+            target.function ??= { name: "", arguments: "" };
+            target.function.name = appendStreamFragment(target.function.name, fragment.function.name);
+            target.function.arguments = appendStreamFragment(target.function.arguments, fragment.function.arguments);
+        }
+        targetMessage.tool_calls[index] = target;
+    }
+}
+
+function mergeChatCompletionEvent(completion, event) {
+    if (event?.error) {
+        throw Object.assign(new Error(event.error.message || "Chat Completions upstream returned an error"), {
+            status: 502,
+            details: event,
+        });
+    }
+    for (const key of ["id", "model", "created", "system_fingerprint", "usage"]) {
+        if (event?.[key] !== undefined && event[key] !== null) completion[key] = event[key];
+    }
+    for (let position = 0; position < (Array.isArray(event?.choices) ? event.choices.length : 0); position += 1) {
+        const fragmentChoice = event.choices[position];
+        if (!fragmentChoice || typeof fragmentChoice !== "object") continue;
+        const index = Number.isInteger(fragmentChoice.index) ? fragmentChoice.index : position;
+        const targetChoice = completion.choices[index] ?? {
+            index,
+            message: { role: "assistant", content: "" },
+            finish_reason: null,
+        };
+        const fragment = fragmentChoice.delta && typeof fragmentChoice.delta === "object"
+            ? fragmentChoice.delta
+            : fragmentChoice.message && typeof fragmentChoice.message === "object"
+                ? fragmentChoice.message
+                : {};
+        if (typeof fragment.role === "string") targetChoice.message.role = fragment.role;
+        targetChoice.message.content = appendStreamFragment(targetChoice.message.content, contentText(fragment.content));
+        targetChoice.message.reasoning_content = appendStreamFragment(targetChoice.message.reasoning_content, fragment.reasoning_content);
+        if (fragment.function_call && typeof fragment.function_call === "object") {
+            targetChoice.message.function_call ??= { name: "", arguments: "" };
+            targetChoice.message.function_call.name = appendStreamFragment(targetChoice.message.function_call.name, fragment.function_call.name);
+            targetChoice.message.function_call.arguments = appendStreamFragment(targetChoice.message.function_call.arguments, fragment.function_call.arguments);
+        }
+        mergeStreamToolCalls(targetChoice.message, fragment.tool_calls);
+        if (fragmentChoice.finish_reason !== undefined && fragmentChoice.finish_reason !== null) {
+            targetChoice.finish_reason = fragmentChoice.finish_reason;
+        }
+        completion.choices[index] = targetChoice;
+    }
+}
+
+function chatCompletionFromSse(text) {
+    const completion = { object: "chat.completion", choices: [] };
+    let sawPayload = false;
+    for (const event of chatSseEvents(text)) {
+        sawPayload = true;
+        mergeChatCompletionEvent(completion, event);
+    }
+    if (!sawPayload || completion.choices.length === 0) {
+        throw Object.assign(new Error("Chat Completions upstream returned an empty SSE stream"), { status: 502 });
+    }
+    return completion;
+}
+
+const SSE_DONE = Symbol("sse-done");
+
+function parseSseBlock(block) {
+    const data = String(block || "").split(/\r?\n/u)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n")
+        .trim();
+    if (!data) return null;
+    if (data === "[DONE]") return SSE_DONE;
+    try {
+        return JSON.parse(data);
+    }
+    catch (error) {
+        throw Object.assign(new Error("Chat Completions upstream returned invalid SSE data"), {
+            status: 502,
+            details: data.slice(0, 2000),
+            cause: error,
+        });
+    }
+}
+
+function takeSseBlock(state) {
+    const boundary = /\r?\n\r?\n/u.exec(state.buffer);
+    if (!boundary) return null;
+    const block = state.buffer.slice(0, boundary.index);
+    state.buffer = state.buffer.slice(boundary.index + boundary[0].length);
+    return { value: parseSseBlock(block) };
+}
+
+async function prepareChatSse(response) {
+    if (!response.body) {
+        const completion = chatCompletionFromSse(await response.text());
+        return { bufferedCompletion: completion };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const state = { buffer: "" };
+    try {
+        while (true) {
+            let block;
+            while ((block = takeSseBlock(state)) !== null) {
+                if (block.value === null) continue;
+                if (block.value === SSE_DONE) throw Object.assign(new Error("Chat Completions upstream returned an empty SSE stream"), { status: 502 });
+                if (block.value?.error) {
+                    throw Object.assign(new Error(block.value.error.message || "Chat Completions upstream returned an error"), {
+                        status: 400,
+                        details: block.value,
+                        compatibility: true,
+                    });
+                }
+                return { reader, decoder, state, firstEvent: block.value };
+            }
+            const chunk = await reader.read();
+            if (chunk.done) {
+                state.buffer += decoder.decode();
+                const finalValue = parseSseBlock(state.buffer);
+                if (finalValue && finalValue !== SSE_DONE) {
+                    if (finalValue?.error) {
+                        throw Object.assign(new Error(finalValue.error.message || "Chat Completions upstream returned an error"), {
+                            status: 400,
+                            details: finalValue,
+                            compatibility: true,
+                        });
+                    }
+                    return { reader, decoder, state: { buffer: "" }, firstEvent: finalValue, ended: true };
+                }
+                throw Object.assign(new Error("Chat Completions upstream returned an empty SSE stream"), { status: 502 });
+            }
+            state.buffer += decoder.decode(chunk.value, { stream: true });
+        }
+    }
+    catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+    }
+}
+
+async function* preparedChatSseEvents(prepared) {
+    if (prepared.bufferedCompletion) return;
+    yield prepared.firstEvent;
+    if (prepared.ended) return;
+    const { reader, decoder, state } = prepared;
+    while (true) {
+        let block;
+        while ((block = takeSseBlock(state)) !== null) {
+            if (block.value === SSE_DONE) return;
+            if (block.value !== null) yield block.value;
+        }
+        const chunk = await reader.read();
+        if (chunk.done) {
+            state.buffer += decoder.decode();
+            const finalValue = parseSseBlock(state.buffer);
+            if (finalValue && finalValue !== SSE_DONE) yield finalValue;
+            return;
+        }
+        state.buffer += decoder.decode(chunk.value, { stream: true });
+    }
+}
+
+async function consumePreparedChatSse(prepared) {
+    if (prepared.bufferedCompletion) return prepared.bufferedCompletion;
+    const completion = { object: "chat.completion", choices: [] };
+    for await (const event of preparedChatSseEvents(prepared)) mergeChatCompletionEvent(completion, event);
+    if (completion.choices.length === 0) {
+        throw Object.assign(new Error("Chat Completions upstream returned an empty SSE stream"), { status: 502 });
+    }
+    return completion;
+}
+
+async function writeChatSseResponses(res, prepared, requestBody, toolMapping) {
+    const completion = { object: "chat.completion", choices: [] };
+    let responseId = null;
+    let responseModel = requestBody.model;
+    let responseCreated = Math.floor(Date.now() / 1000);
+    let textItemId = null;
+    let textStarted = false;
+    let text = "";
+    let toolStream = false;
+    let sequenceNumber = 0;
+    let emittedHead = false;
+    const emit = (event) => writeSseEvent(res, event, sequenceNumber++);
+    const ensureHead = () => {
+        if (emittedHead) return;
+        emittedHead = true;
+        res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache, no-store",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+        });
+        emit({
+            type: "response.created",
+            response: {
+                id: responseId || `resp_${randomUUID().replace(/-/gu, "")}`,
+                object: "response",
+                created_at: responseCreated,
+                status: "in_progress",
+                model: responseModel,
+                output: [],
+                usage: null,
+            },
+        });
+    };
+    for await (const event of preparedChatSseEvents(prepared)) {
+        mergeChatCompletionEvent(completion, event);
+        responseId = typeof event?.id === "string" && event.id
+            ? event.id.replace(/^chatcmpl-/u, "resp_")
+            : responseId;
+        if (typeof event?.model === "string" && event.model) responseModel = event.model;
+        if (Number.isFinite(event?.created)) responseCreated = event.created;
+        const choice = Array.isArray(event?.choices) ? event.choices[0] : null;
+        const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta : {};
+        if (delta.tool_calls || delta.function_call) {
+            toolStream = true;
+            continue;
+        }
+        const deltaText = contentText(delta.content);
+        if (!deltaText) continue;
+        ensureHead();
+        if (!textStarted) {
+            textStarted = true;
+            textItemId = `msg_${randomUUID().replace(/-/gu, "")}`;
+            emit({
+                type: "response.output_item.added",
+                output_index: 0,
+                item: {
+                    id: textItemId,
+                    type: "message",
+                    status: "in_progress",
+                    role: "assistant",
+                    content: [],
+                },
+            });
+            emit({
+                type: "response.content_part.added",
+                item_id: textItemId,
+                output_index: 0,
+                content_index: 0,
+                part: { type: "output_text", text: "", annotations: [] },
+            });
+        }
+        text += deltaText;
+        emit({ type: "response.output_text.delta", item_id: textItemId, output_index: 0, content_index: 0, delta: deltaText });
+    }
+    if (toolStream || !textStarted) {
+        const response = chatCompletionToResponse(completion, requestBody, toolMapping);
+        if (!emittedHead) {
+            writeResponsesSse(res, response);
+            return;
+        }
+    }
+    else {
+        const response = chatCompletionToResponse(completion, requestBody, toolMapping);
+        response.id = responseId || response.id;
+        response.model = responseModel;
+        if (response.output[0]?.type === "message") {
+            response.output[0].id = textItemId;
+            response.output[0].content[0].text = text;
+        }
+        emit({ type: "response.output_text.done", item_id: textItemId, output_index: 0, content_index: 0, text });
+        emit({ type: "response.content_part.done", item_id: textItemId, output_index: 0, content_index: 0, part: { type: "output_text", text, annotations: [] } });
+        emit({ type: "response.output_item.done", output_index: 0, item: response.output[0] });
+        emit({ type: "response.completed", response });
+        res.end("data: [DONE]\n\n");
+    }
+}
+
+async function parseChatCompletion(response) {
+    const text = await response.text();
+    let payload;
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const looksLikeSse = contentType.includes("text/event-stream") || /^\s*(?:event:[^\n]*\n)?data:/u.test(text);
+    if (looksLikeSse && response.ok) return chatCompletionFromSse(text);
+    try {
+        payload = text ? JSON.parse(text) : {};
+    }
+    catch {
+        throw Object.assign(new Error(`Chat Completions upstream returned invalid JSON (HTTP ${response.status})`), {
+            status: response.ok ? 502 : response.status,
+            details: text.slice(0, 2000),
+        });
+    }
+    if (!response.ok) {
+        const message = payload?.error?.message || payload?.message || `Chat Completions upstream failed with HTTP ${response.status}`;
+        throw Object.assign(new Error(message), { status: response.status, details: payload });
+    }
+    if (payload?.error) {
+        throw Object.assign(new Error(payload.error.message || "Chat Completions upstream returned an error"), {
+            status: 502,
+            details: payload,
+        });
+    }
+    return payload;
+}
+
+function withoutStrictTools(payload) {
+    if (!Array.isArray(payload.tools)) return payload;
+    return {
+        ...payload,
+        tools: payload.tools.map((tool) => {
+            if (!tool?.function || typeof tool.function !== "object" || tool.function.strict === undefined) return tool;
+            const fn = { ...tool.function };
+            delete fn.strict;
+            return { ...tool, function: fn };
+        }),
+    };
+}
+
+export function buildChatCompatibilityAttempts(payload) {
+    const attempts = [];
+    const add = (candidate) => {
+        const serialized = JSON.stringify(candidate);
+        if (!attempts.some((item) => JSON.stringify(item) === serialized)) attempts.push(candidate);
+        return candidate;
+    };
+    const addStreamingPair = (candidate) => {
+        add(candidate);
+        if (candidate.stream === true) add({ ...candidate, stream: false });
+        return candidate;
+    };
+    let candidate = addStreamingPair(payload);
+
+    candidate = { ...candidate };
+    delete candidate.reasoning_effort;
+    addStreamingPair(candidate);
+
+    candidate = { ...candidate };
+    delete candidate.parallel_tool_calls;
+    delete candidate.response_format;
+    addStreamingPair(candidate);
+
+    candidate = withoutStrictTools(candidate);
+    addStreamingPair(candidate);
+
+    candidate = { ...candidate };
+    delete candidate.temperature;
+    delete candidate.top_p;
+    addStreamingPair(candidate);
+
+    if (Number.isFinite(candidate.max_completion_tokens)) {
+        candidate = { ...candidate, max_tokens: candidate.max_completion_tokens };
+        delete candidate.max_completion_tokens;
+        addStreamingPair(candidate);
+    }
+
+    candidate = { ...candidate };
+    delete candidate.max_tokens;
+    delete candidate.max_completion_tokens;
+    addStreamingPair(candidate);
+    return attempts;
+}
+
+async function fetchChatCompletion(req, profile, payload, fetchImpl, profileLoader, trace) {
+    const invoke = (requestPayload, currentProfile) => {
         return fetchImpl(normalizeChatEndpoint(currentProfile.baseUrl), {
         method: "POST",
-        headers,
+        headers: buildJsonApiHeaders(req, currentProfile),
         body: JSON.stringify(requestPayload),
         });
     };
-    const attempts = [payload];
-    const withoutReasoning = { ...payload };
-    delete withoutReasoning.reasoning_effort;
-    if (JSON.stringify(withoutReasoning) !== JSON.stringify(payload)) attempts.push(withoutReasoning);
-    if (Number.isFinite(withoutReasoning.max_completion_tokens)) {
-        const legacyTokens = { ...withoutReasoning, max_tokens: withoutReasoning.max_completion_tokens };
-        delete legacyTokens.max_completion_tokens;
-        attempts.push(legacyTokens);
-    }
-    const minimal = { ...attempts.at(-1) };
-    delete minimal.parallel_tool_calls;
-    delete minimal.response_format;
-    if (JSON.stringify(minimal) !== JSON.stringify(attempts.at(-1))) attempts.push(minimal);
-    let response;
+    const attempts = buildChatCompatibilityAttempts(payload);
     for (let index = 0; index < attempts.length; index += 1) {
-        const result = await fetchWithSqueezeRetry((currentProfile) => invoke(attempts[index], currentProfile), profile, profileLoader);
-        response = result.response;
+        const result = await fetchWithSqueezeRetry((currentProfile) => invoke(attempts[index], currentProfile), profile, profileLoader, {
+            trace,
+            stage: `Chat Completions 兼容请求 ${index + 1}/${attempts.length}`,
+            endpoint: (currentProfile) => normalizeChatEndpoint(currentProfile.baseUrl),
+        });
+        const response = result.response;
         profile = result.profile;
-        if (response.ok || ![400, 422].includes(response.status) || index === attempts.length - 1) break;
-        await response.arrayBuffer();
+        if (!response.ok) {
+            if ([400, 422].includes(response.status) && index < attempts.length - 1) {
+                await response.arrayBuffer();
+                continue;
+            }
+            return { type: "completion", completion: await parseChatCompletion(response) };
+        }
+        const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+        if (contentType.includes("text/event-stream")) {
+            try {
+                return { type: "sse", prepared: await prepareChatSse(response) };
+            }
+            catch (error) {
+                if (error?.compatibility === true && index < attempts.length - 1) continue;
+                throw error;
+            }
+        }
+        return { type: "completion", completion: await parseChatCompletion(response) };
     }
-    return parseUpstreamJson(response);
+    throw Object.assign(new Error("Chat Completions compatibility attempts were exhausted"), { status: 502 });
 }
 
 async function handleModels(req, res, profile, fetchImpl) {
@@ -829,32 +1420,38 @@ async function handleModels(req, res, profile, fetchImpl) {
         });
         return;
     }
-    const headers = { accept: "application/json" };
-    if (typeof profile.apiKey === "string" && profile.apiKey.trim()) {
-        headers.authorization = `Bearer ${profile.apiKey.trim()}`;
-    }
+    const headers = buildJsonApiHeaders(req, profile);
+    delete headers["content-type"];
     const response = await fetchImpl(normalizeModelsEndpoint(profile.baseUrl), { headers });
     const payload = await parseUpstreamJson(response);
     sendJson(res, 200, payload);
 }
 
-async function respondThroughChat(res, profile, requestBody, fetchImpl, profileLoader) {
+async function respondThroughChat(req, res, profile, requestBody, fetchImpl, profileLoader, trace) {
     const translated = translateResponsesRequest(requestBody);
-    const chatCompletion = await fetchChatCompletion(profile, translated.payload, fetchImpl, profileLoader);
+    const result = await fetchChatCompletion(req, profile, translated.payload, fetchImpl, profileLoader, trace);
+    if (result.type === "sse" && requestBody.stream === true && translated.toolMapping.chatTools.length === 0) {
+        await writeChatSseResponses(res, result.prepared, requestBody, translated.toolMapping);
+        return;
+    }
+    const chatCompletion = result.type === "sse"
+        ? await consumePreparedChatSse(result.prepared)
+        : result.completion;
     const response = chatCompletionToResponse(chatCompletion, requestBody, translated.toolMapping);
-    if (requestBody.stream === false) {
+    if (requestBody.stream !== true) {
         sendJson(res, 200, response);
         return;
     }
     writeResponsesSse(res, response);
 }
 
-async function handleNativeResponses(req, res, profile, requestBody, fetchImpl, logger, profileLoader) {
+async function handleNativeResponses(req, res, profile, requestBody, fetchImpl, logger, profileLoader, trace) {
     const requestKind = codexRequestKind(req);
     let nativeResult = await fetchWithSqueezeRetry(
         (currentProfile) => fetchNativeResponse(req, currentProfile, requestBody, fetchImpl, false),
         profile,
         profileLoader,
+        { trace, stage: "Responses 主请求", endpoint: (currentProfile) => normalizeResponsesEndpoint(currentProfile.baseUrl) },
     );
     profile = nativeResult.profile;
     let upstream = nativeResult.response;
@@ -870,6 +1467,7 @@ async function handleNativeResponses(req, res, profile, requestBody, fetchImpl, 
             (currentProfile) => fetchNativeResponse(req, currentProfile, requestBody, fetchImpl, true),
             profile,
             profileLoader,
+            { trace, stage: "Responses 去除 Codex 元数据", endpoint: (currentProfile) => normalizeResponsesEndpoint(currentProfile.baseUrl) },
         );
         profile = nativeResult.profile;
         upstream = nativeResult.response;
@@ -884,7 +1482,7 @@ async function handleNativeResponses(req, res, profile, requestBody, fetchImpl, 
     if (nativeReturnedHtml || shouldUseChatCompatibilityFallback(upstream.status, failure.payload, failure.text, requestKind)) {
         try {
             logger?.warn?.({ provider: profile.name, requestKind, status: upstream.status }, "Responses request rejected; falling back to Chat Completions");
-            await respondThroughChat(res, profile, requestBody, fetchImpl, profileLoader);
+            await respondThroughChat(req, res, profile, requestBody, fetchImpl, profileLoader, trace);
             return;
         }
         catch (fallbackError) {
@@ -904,11 +1502,20 @@ async function handleNativeResponses(req, res, profile, requestBody, fetchImpl, 
 async function handleResponses(req, res, profile, fetchImpl, logger, profileLoader) {
     const rawBody = await readRawBody(req);
     const requestBody = parseJsonBody(rawBody, req.headers["content-encoding"]);
-    if (profile.wireApi === "chat") {
-        await respondThroughChat(res, profile, requestBody, fetchImpl, profileLoader);
-        return;
+    const trace = beginCodexRetryTrace({ profileName: profile.name });
+    try {
+        if (profile.wireApi === "chat") {
+            await respondThroughChat(req, res, profile, requestBody, fetchImpl, profileLoader, trace);
+        }
+        else {
+            await handleNativeResponses(req, res, profile, requestBody, fetchImpl, logger, profileLoader, trace);
+        }
+        finishCodexRetryTrace(trace, { outcome: "success", status: res.statusCode });
     }
-    await handleNativeResponses(req, res, profile, requestBody, fetchImpl, logger, profileLoader);
+    catch (error) {
+        finishCodexRetryTrace(trace, { outcome: "failed", error });
+        throw error;
+    }
 }
 
 export function createCodexChatProxyServer(options = {}) {
@@ -931,13 +1538,12 @@ export function createCodexChatProxyServer(options = {}) {
                 await handleModels(req, res, profile, fetchImpl);
                 return;
             }
-            if (req.method === "POST" && ["/responses", "/v1/responses"].includes(requestPath)) {
-                await handleResponses(req, res, profile, fetchImpl, logger, profileLoader);
+            if (req.method === "POST" && ["/responses/compact", "/v1/responses/compact"].includes(requestPath)) {
+                await handleCompaction(req, res, profile, fetchImpl, profileLoader, logger);
                 return;
             }
-            if (req.method === "POST" && ["/responses/compact", "/v1/responses/compact"].includes(requestPath)) {
-                req.resume();
-                sendError(res, 501, "Standalone remote compaction is disabled for portable Paseo provider switching", "unsupported_feature");
+            if (req.method === "POST" && ["/responses", "/v1/responses"].includes(requestPath)) {
+                await handleResponses(req, res, profile, fetchImpl, logger, profileLoader);
                 return;
             }
             sendError(res, 404, `Unsupported Paseo Codex proxy route: ${req.method} ${requestPath}`);

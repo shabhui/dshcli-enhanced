@@ -8,6 +8,10 @@
   var CHINESE_MARKER_KEY = "@paseo:zh-cn-enabled:v1";
   var QUEUE_SEND_MARKER_KEY = "@paseo:queue-send-enabled:v2";
 
+  function requiresInternetConnection() {
+    return window.__PASEO_STANDALONE_ANDROID__ !== true;
+  }
+
   function enableChineseOnce() {
     document.documentElement.lang = "zh-CN";
     try {
@@ -170,10 +174,10 @@
     window.__PASEO_BROWSER_SHOW__ = show;
 
     window.addEventListener("offline", function () {
-      show("网络已断开，恢复后 Paseo 会自动重连。", "error", false, 0);
+      if (requiresInternetConnection()) show("网络已断开，恢复后 Paseo 会自动重连。", "error", false, 0);
     });
     window.addEventListener("online", function () {
-      show("网络已恢复，正在重新连接。", "success", false, 2200);
+      if (requiresInternetConnection()) show("网络已恢复，正在重新连接。", "success", false, 2200);
     });
     window.addEventListener("unhandledrejection", function (event) {
       var reason = event.reason;
@@ -191,7 +195,7 @@
       }
     }, true);
 
-    if (navigator.onLine === false) {
+    if (requiresInternetConnection() && navigator.onLine === false) {
       window.setTimeout(function () {
         show("网络已断开，恢复后 Paseo 会自动重连。", "error", false, 0);
       }, 0);
@@ -202,7 +206,7 @@
     var lastSnapshot = null;
     var pending = false;
     async function poll() {
-      if (pending || navigator.onLine === false) {
+      if (pending || (requiresInternetConnection() && navigator.onLine === false)) {
         window.setTimeout(poll, 12000);
         return;
       }

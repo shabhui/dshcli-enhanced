@@ -9,9 +9,26 @@ import { loadPersistedConfig, savePersistedConfig } from "./persisted-config.js"
 import {
     applyProviderOverridesToRuntime,
     assertProviderId,
+    CODEX_REASONING_EFFORT_IDS,
+    PI_THINKING_OPTION_IDS,
+    mergeProviderSnapshotEntries,
     mergeProviderOverrides,
+    modelIdsToAdditionalModels,
+    prepareProviderOverridesForRuntime,
+    providerApiValuesFromOverride,
     providerViewFromSnapshot,
 } from "./paseo-provider-config.js";
+import { addAgentCli, installAgentCli, listAgentCliCatalog, updateAgentCli } from "./paseo-agent-cli-installer.js";
+import { preparePiProviderOverrides } from "./paseo-pi-model-config.js";
+import { fetchProviderModels, resolveProviderModelRequest } from "./paseo-provider-models.js";
+import {
+    activateSupplierProfile,
+    deleteSupplierProfile,
+    getSupplierProfile,
+    listSupplierProfiles,
+    saveSupplierProfile,
+    supplierProfileToProviderInput,
+} from "./paseo-agent-suppliers.js";
 
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
@@ -19,6 +36,7 @@ const MAX_IMPORT_COUNT = 1000;
 const TRANSCRIPT_PREFIX_BYTES = 512 * 1024;
 const PROVIDER_SCAN_TIMEOUT_MS = 6000;
 const LOCAL_TRANSCRIPT_PROVIDERS = new Set(["codex", "claude"]);
+const MAX_GLOBAL_SYSTEM_PROMPT_LENGTH = 65536;
 
 function isLoopbackRequest(req) {
     return LOOPBACK_ADDRESSES.has(req.socket.remoteAddress ?? "");
@@ -48,6 +66,13 @@ function requireString(value, label, maximum = 8192) {
         throw new Error(`${label} is invalid`);
     }
     return result;
+}
+
+function requireGlobalSystemPrompt(value) {
+    if (typeof value !== "string" || value.length > MAX_GLOBAL_SYSTEM_PROMPT_LENGTH || /\0/u.test(value)) {
+        throw new Error("Global system prompt is invalid");
+    }
+    return value;
 }
 
 async function pathExists(filePath) {
@@ -570,7 +595,8 @@ async function directoryRoots() {
 }
 
 async function listDirectories(requestedPath) {
-    const raw = requestedPath ? requireString(requestedPath, "Directory path") : "/storage/emulated/0";
+    const defaultPath = process.platform === "android" ? homedir() : "/storage/emulated/0";
+    const raw = requestedPath ? requireString(requestedPath, "Directory path") : defaultPath;
     const resolved = await fs.realpath(path.resolve(raw));
     const stats = await fs.stat(resolved);
     if (!stats.isDirectory())
@@ -700,6 +726,15 @@ async function importOneConversation(runtime, body) {
     const provider = requireString(body.providerId ?? body.provider, "Provider id", 100);
     const providerHandleId = requireString(body.providerHandleId ?? body.sessionId, "Provider session id", 300);
     const cwd = requireString(body.cwd, "Conversation cwd", 8192);
+    const existing = (await runtime.agentStorage.list()).find((record) => {
+        if (record?.provider !== provider) return false;
+        const persistence = record?.persistence;
+        const runtimeInfo = record?.runtimeInfo;
+        return [persistence?.sessionId, persistence?.nativeHandle, runtimeInfo?.sessionId].includes(providerHandleId);
+    });
+    if (existing) {
+        return { imported: { id: existing.id, provider, providerHandleId, existing: true } };
+    }
     const result = await importProviderSession({
         request: { provider, providerHandleId, cwd },
         workspaceProvisioning: runtime.workspaceProvisioning,
@@ -744,27 +779,135 @@ function writeProviderOverrides(runtime, persisted, providers) {
 async function listAgentProviders(runtime) {
     const overrides = readProviderOverrides(runtime);
     const entries = await runtime.providerSnapshotManager.listProviders({ wait: true });
-    return entries.map((entry) => ({
-        ...providerViewFromSnapshot(entry, overrides[entry.provider] ?? {}),
-        status: entry.status,
-    }));
+    const registeredProviderIds = runtime.providerSnapshotManager.listRegisteredProviderIds();
+    const providerDefinitions = runtime.providerSnapshotManager.getAgentManagerProviderState?.().providerDefinitions
+        ?? runtime.agentManager?.providerDefinitions
+        ?? {};
+    return mergeProviderSnapshotEntries(entries, registeredProviderIds, providerDefinitions, overrides);
+}
+
+async function findAgentProvider(runtime, providerId) {
+    const providers = await listAgentProviders(runtime);
+    const provider = providers.find((item) => item.id === providerId);
+    if (!provider) throw new Error("Agent is not registered");
+    return provider;
+}
+
+async function applySupplierProfileToAgent(runtime, providerId, profile) {
+    const provider = await findAgentProvider(runtime, providerId);
+    const providerInput = supplierProfileToProviderInput(profile, provider.agentFamilyId);
+    const thinkingOptionIds = provider.agentFamilyId === "codex"
+        ? CODEX_REASONING_EFFORT_IDS
+        : provider.agentFamilyId === "pi"
+            ? PI_THINKING_OPTION_IDS
+            : [];
+    const changes = {
+        ...providerInput,
+        enabled: true,
+        additionalModels: modelIdsToAdditionalModels(providerInput.additionalModelIds, {
+            defaultModel: providerInput.model,
+            thinkingOptionIds,
+            defaultThinkingOptionId: providerInput.thinkingOptionId,
+            contextWindowMaxTokens: providerInput.contextWindowMaxTokens,
+        }),
+        replaceEnv: true,
+    };
+    delete changes.additionalModelIds;
+    delete changes.thinkingOptionId;
+    const persisted = loadPersistedConfig(runtime.paseoHome, runtime.logger);
+    const current = persisted.agents?.providers ?? {};
+    const providers = mergeProviderOverrides(current, providerId, changes, { providerFamily: provider.agentFamilyId });
+    if (providers[providerId]) ProviderOverrideSchema.parse(prepareProviderOverridesForRuntime({ [providerId]: providers[providerId] })[providerId]);
+    const runtimeProviders = await preparePiProviderOverrides(runtime.paseoHome, providers);
+    writeProviderOverrides(runtime, persisted, providers);
+    applyProviderOverridesToRuntime(runtime, runtimeProviders);
+    await runtime.providerSnapshotManager.refreshSettingsSnapshot({ providers: [providerId] });
+    return { provider, providers: await listAgentProviders(runtime) };
+}
+
+async function listAgentSuppliers(runtime, body) {
+    const providerId = assertProviderId(requireString(body.providerId ?? body.agentId, "Agent id", 100));
+    const provider = await findAgentProvider(runtime, providerId);
+    return {
+        ...(await listSupplierProfiles(runtime.paseoHome, providerId)),
+        provider,
+    };
+}
+
+async function saveAgentSupplier(runtime, body) {
+    const providerId = assertProviderId(requireString(body.providerId ?? body.agentId, "Agent id", 100));
+    const profileInput = requireObject(body.profile ?? body);
+    if (body.supplierId && !profileInput.id) profileInput.id = body.supplierId;
+    const saved = await saveSupplierProfile(runtime.paseoHome, providerId, profileInput);
+    const activate = body.activate !== false;
+    let suppliers = saved;
+    let applied = null;
+    if (activate) {
+        suppliers = await activateSupplierProfile(runtime.paseoHome, providerId, saved.savedSupplierId ?? profileInput.id ?? saved.activeId);
+        const profile = await getSupplierProfile(runtime.paseoHome, providerId, suppliers.activeId);
+        applied = await applySupplierProfileToAgent(runtime, providerId, profile);
+    }
+    return {
+        suppliers,
+        providers: applied?.providers ?? await listAgentProviders(runtime),
+        savedSupplierId: saved.savedSupplierId ?? profileInput.id ?? suppliers.activeId,
+        activated: activate,
+    };
+}
+
+async function switchAgentSupplier(runtime, body) {
+    const providerId = assertProviderId(requireString(body.providerId ?? body.agentId, "Agent id", 100));
+    const supplierId = requireString(body.supplierId, "Supplier id", 100);
+    const suppliers = await activateSupplierProfile(runtime.paseoHome, providerId, supplierId);
+    const profile = await getSupplierProfile(runtime.paseoHome, providerId, supplierId);
+    const applied = await applySupplierProfileToAgent(runtime, providerId, profile);
+    return { suppliers, providers: applied.providers, switchedSupplierId: supplierId };
+}
+
+async function deleteAgentSupplier(runtime, body) {
+    const providerId = assertProviderId(requireString(body.providerId ?? body.agentId, "Agent id", 100));
+    const supplierId = requireString(body.supplierId, "Supplier id", 100);
+    const suppliers = await deleteSupplierProfile(runtime.paseoHome, providerId, supplierId);
+    const profile = suppliers.activeId ? await getSupplierProfile(runtime.paseoHome, providerId, suppliers.activeId) : null;
+    const applied = profile ? await applySupplierProfileToAgent(runtime, providerId, profile) : null;
+    return { suppliers, providers: applied?.providers ?? await listAgentProviders(runtime), deletedSupplierId: supplierId };
 }
 
 async function saveAgentProvider(runtime, body) {
     const providerId = assertProviderId(requireString(body.providerId, "Provider id", 100));
-    if (!runtime.providerSnapshotManager.hasProvider(providerId)) {
+    const isRegistered = runtime.providerSnapshotManager.hasProvider(providerId);
+    if (!isRegistered && typeof body.extends !== "string") {
         throw new Error("Provider is not registered");
     }
     const changes = {};
-    for (const field of ["enabled", "command", "env", "additionalModels"]) {
+    for (const field of ["extends", "label", "description", "enabled", "command", "env", "additionalModels", "apiProtocol", "baseUrl", "apiKey", "model", "contextWindowMaxTokens"]) {
         if (Object.prototype.hasOwnProperty.call(body, field)) changes[field] = body[field];
     }
     const persisted = loadPersistedConfig(runtime.paseoHome, runtime.logger);
     const current = persisted.agents?.providers ?? {};
-    const providers = mergeProviderOverrides(current, providerId, changes);
-    if (providers[providerId]) providers[providerId] = ProviderOverrideSchema.parse(providers[providerId]);
+    const providerFamily = typeof body.providerFamily === "string" && body.providerFamily.trim()
+        ? body.providerFamily.trim()
+        : typeof body.extends === "string" && body.extends.trim()
+            ? body.extends.trim()
+            : typeof current[providerId]?.extends === "string" && current[providerId].extends.trim()
+                ? current[providerId].extends.trim()
+            : providerId;
+    if (Object.prototype.hasOwnProperty.call(body, "additionalModelIds")) {
+        changes.additionalModels = modelIdsToAdditionalModels(body.additionalModelIds, {
+            defaultModel: body.model,
+            thinkingOptionIds: providerFamily === "codex"
+                ? CODEX_REASONING_EFFORT_IDS
+                : providerFamily === "pi"
+                    ? PI_THINKING_OPTION_IDS
+                    : [],
+            contextWindowMaxTokens: body.contextWindowMaxTokens,
+        });
+    }
+    const providers = mergeProviderOverrides(current, providerId, changes, { providerFamily });
+    if (providers[providerId]) ProviderOverrideSchema.parse(prepareProviderOverridesForRuntime({ [providerId]: providers[providerId] })[providerId]);
+    const runtimeProviders = await preparePiProviderOverrides(runtime.paseoHome, providers);
     writeProviderOverrides(runtime, persisted, providers);
-    applyProviderOverridesToRuntime(runtime, providers);
+    applyProviderOverridesToRuntime(runtime, runtimeProviders);
     await runtime.providerSnapshotManager.refreshSettingsSnapshot({ providers: [providerId] });
     return { providers: await listAgentProviders(runtime), savedProviderId: providerId };
 }
@@ -776,6 +919,23 @@ async function refreshAgentProvider(runtime, body) {
     }
     await runtime.providerSnapshotManager.refreshSettingsSnapshot({ providers: [providerId] });
     return { providers: await listAgentProviders(runtime), refreshedProviderId: providerId };
+}
+
+async function discoverProviderModels(runtime, body) {
+    const providerId = assertProviderId(requireString(body.providerId, "Provider id", 100));
+    if (!runtime.providerSnapshotManager.hasProvider(providerId)) {
+        throw new Error("Provider is not registered");
+    }
+    const agent = await findAgentProvider(runtime, providerId);
+    const overrides = readProviderOverrides(runtime);
+    const saved = providerApiValuesFromOverride(providerId, overrides[providerId] ?? {}, agent.agentFamilyId);
+    const request = resolveProviderModelRequest(body, saved);
+    const models = await fetchProviderModels({
+        providerId,
+        providerFamilyId: agent.agentFamilyId,
+        ...request,
+    });
+    return { providerId, models };
 }
 
 async function listWorkspaces(runtime) {
@@ -806,6 +966,18 @@ async function addWorkspace(runtime, body) {
     };
 }
 
+async function standaloneBootstrap(runtime) {
+    if (process.env.PASEO_STANDALONE_ANDROID !== "1")
+        throw new Error("Standalone Android mode is not enabled");
+    const route = `/h/${encodeURIComponent(runtime.serverId)}/open-project`;
+    return {
+        standalone: true,
+        serverId: runtime.serverId,
+        label: "Paseo 本机",
+        route,
+    };
+}
+
 function requireRuntime(runtime) {
     if (!runtime)
         throw new Error("Paseo management service is still starting");
@@ -821,6 +993,28 @@ async function handleGet(runtime, query) {
     }
     if (action === "providers")
         return { providers: await listAgentProviders(requireRuntime(runtime)) };
+    if (action === "global-settings") {
+        const activeRuntime = requireRuntime(runtime);
+        const config = activeRuntime.daemonConfigStore.get();
+        return {
+            globalSystemPrompt: typeof config.appendSystemPrompt === "string" ? config.appendSystemPrompt : "",
+            // The built-in environment prompt every Agent already receives. Read-only: the
+            // user's globalSystemPrompt is appended to it, not a replacement for it.
+            baseSystemPrompt: typeof activeRuntime.baseSystemPrompt === "string" ? activeRuntime.baseSystemPrompt : "",
+        };
+    }
+    if (action === "mcp-settings") {
+        const activeRuntime = requireRuntime(runtime);
+        const config = activeRuntime.daemonConfigStore.get();
+        return {
+            serviceEnabled: activeRuntime.mcpServiceEnabled !== false,
+            injectIntoAgents: config.mcp?.injectIntoAgents === true,
+        };
+    }
+    if (action === "supplier-profiles")
+        return await listAgentSuppliers(requireRuntime(runtime), query);
+    if (action === "provider-cli-catalog")
+        return { catalog: await listAgentCliCatalog(requireRuntime(runtime)) };
     if (action === "conversations")
         return { conversations: await listConversations(requireRuntime(runtime)) };
     if (action === "importable") {
@@ -829,6 +1023,8 @@ async function handleGet(runtime, query) {
     }
     if (action === "workspaces")
         return { workspaces: await listWorkspaces(requireRuntime(runtime)) };
+    if (action === "standalone-bootstrap")
+        return await standaloneBootstrap(requireRuntime(runtime));
     if (action === "directories")
         return await listDirectories(typeof query.path === "string" ? query.path : undefined);
     if (action === "skills")
@@ -841,6 +1037,24 @@ async function handleGet(runtime, query) {
 async function handlePost(runtime, body) {
     const input = requireObject(body);
     const action = requireString(input.action, "Action", 80);
+    if (action === "global-settings-save") {
+        const activeRuntime = requireRuntime(runtime);
+        const value = requireGlobalSystemPrompt(input.appendSystemPrompt ?? input.globalSystemPrompt);
+        const updated = activeRuntime.daemonConfigStore.patch({ appendSystemPrompt: value });
+        return { globalSystemPrompt: typeof updated?.appendSystemPrompt === "string" ? updated.appendSystemPrompt : value };
+    }
+    if (action === "mcp-settings-save") {
+        const activeRuntime = requireRuntime(runtime);
+        if (typeof input.injectIntoAgents !== "boolean")
+            throw new Error("MCP injection setting must be a boolean");
+        const updated = activeRuntime.daemonConfigStore.patch({
+            mcp: { injectIntoAgents: input.injectIntoAgents },
+        });
+        return {
+            serviceEnabled: activeRuntime.mcpServiceEnabled !== false,
+            injectIntoAgents: updated.mcp?.injectIntoAgents === true,
+        };
+    }
     if (action === "conversation-import-all")
         return await importAllConversations(requireRuntime(runtime));
     if (action === "conversation-import")
@@ -849,8 +1063,72 @@ async function handlePost(runtime, body) {
         return await deleteConversation(requireRuntime(runtime), input);
     if (action === "provider-save")
         return await saveAgentProvider(requireRuntime(runtime), input);
+    if (action === "supplier-save")
+        return await saveAgentSupplier(requireRuntime(runtime), input);
+    if (action === "supplier-switch")
+        return await switchAgentSupplier(requireRuntime(runtime), input);
+    if (action === "supplier-delete")
+        return await deleteAgentSupplier(requireRuntime(runtime), input);
     if (action === "provider-refresh")
         return await refreshAgentProvider(requireRuntime(runtime), input);
+    if (action === "provider-models")
+        return await discoverProviderModels(requireRuntime(runtime), input);
+    if (action === "provider-cli-add") {
+        const activeRuntime = requireRuntime(runtime);
+        const added = await addAgentCli(activeRuntime, input);
+        const installed = await installAgentCli(activeRuntime, added.providerId, { force: true });
+        const providers = await saveAgentProvider(activeRuntime, {
+            providerId: added.providerId,
+            extends: added.extends,
+            label: added.label,
+            command: installed.command,
+            enabled: true,
+        });
+        return {
+            added,
+            installed,
+            catalog: await listAgentCliCatalog(activeRuntime),
+            providers: providers.providers,
+        };
+    }
+    if (action === "provider-cli-install") {
+        const activeRuntime = requireRuntime(runtime);
+        const providerId = assertProviderId(requireString(input.providerId, "Provider id", 100));
+        const installed = await installAgentCli(activeRuntime, providerId);
+        if (installed.configureProvider && installed.command) {
+            await saveAgentProvider(activeRuntime, {
+                providerId,
+                command: installed.command,
+                enabled: true,
+                ...(installed.providerExtends ? { extends: installed.providerExtends } : {}),
+                ...(installed.label ? { label: installed.label } : {}),
+            });
+        }
+        return {
+            installed,
+            catalog: await listAgentCliCatalog(activeRuntime),
+            providers: await listAgentProviders(activeRuntime),
+        };
+    }
+    if (action === "provider-cli-update") {
+        const activeRuntime = requireRuntime(runtime);
+        const providerId = assertProviderId(requireString(input.providerId, "Provider id", 100));
+        const updated = await updateAgentCli(activeRuntime, providerId);
+        if (updated.configureProvider && updated.command) {
+            await saveAgentProvider(activeRuntime, {
+                providerId,
+                command: updated.command,
+                enabled: true,
+                ...(updated.providerExtends ? { extends: updated.providerExtends } : {}),
+                ...(updated.label ? { label: updated.label } : {}),
+            });
+        }
+        return {
+            updated,
+            catalog: await listAgentCliCatalog(activeRuntime),
+            providers: await listAgentProviders(activeRuntime),
+        };
+    }
     if (action === "workspace-add")
         return await addWorkspace(requireRuntime(runtime), input);
     if (action === "skill-import")

@@ -4,12 +4,18 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { getCodexRetryStatus } from "./codex-retry-status.js";
 
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const PROVIDER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
-const REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
 const WIRE_APIS = new Set(["responses", "chat"]);
 const PASEO_CODEX_PROXY_BASE_URL = "http://127.0.0.1:6768/v1";
+const MIN_CONTEXT_WINDOW_TOKENS = 1024;
+const MAX_CONTEXT_WINDOW_TOKENS = 4_000_000;
+const DEFAULT_BUSY_RETRY_DELAY_MS = 300;
+const MIN_BUSY_RETRY_DELAY_MS = 100;
+const MAX_BUSY_RETRY_DELAY_MS = 10_000;
 const PERMISSIONS = {
     readonly: { sandboxMode: "read-only", approvalPolicy: "on-request" },
     workspace: { sandboxMode: "workspace-write", approvalPolicy: "on-request" },
@@ -24,6 +30,7 @@ function resolvePaths() {
             : configured.startsWith("~/") ? path.join(homedir(), configured.slice(2)) : path.resolve(configured);
     return {
         configPath: path.join(codexHome, "config.toml"),
+        customModelsPath: path.join(codexHome, "custom-models.json"),
         authPath: path.join(codexHome, "auth.json"),
         profilesPath: path.join(homedir(), ".paseo", "codex-provider-profiles.json"),
     };
@@ -56,6 +63,16 @@ function readTopLevelString(lines, key) {
         if (/^\s*\[/.test(line)) break;
         const value = parseTomlString(line, key);
         if (value !== null) return value;
+    }
+    return null;
+}
+
+function readTopLevelNumber(lines, key) {
+    const pattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*([+-]?\\d+(?:\\.\\d+)?)\\s*(?:#.*)?$`);
+    for (const line of lines) {
+        if (/^\s*\[/.test(line)) break;
+        const match = line.match(pattern);
+        if (match) return Number(match[1]);
     }
     return null;
 }
@@ -100,6 +117,10 @@ function normalizeBaseUrl(value) {
     return trimmed;
 }
 
+function canReuseApiKey(existingBaseUrl, nextBaseUrl) {
+    return typeof existingBaseUrl === "string" && existingBaseUrl.trim().replace(/\/+$/u, "") === nextBaseUrl;
+}
+
 function setTopLevelString(configText, key, value) {
     const newline = configText.includes("\r\n") ? "\r\n" : "\n";
     const lines = configText.replace(/\r\n/g, "\n").split("\n");
@@ -110,6 +131,19 @@ function setTopLevelString(configText, key, value) {
         if (pattern.test(lines[index])) { lines[index] = `${key} = ${JSON.stringify(value)}`; return lines.join(newline); }
     }
     lines.unshift(`${key} = ${JSON.stringify(value)}`);
+    return lines.join(newline);
+}
+
+function setTopLevelNumber(configText, key, value) {
+    const newline = configText.includes("\r\n") ? "\r\n" : "\n";
+    const lines = configText.replace(/\r\n/g, "\n").split("\n");
+    const pattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`);
+    const firstSection = lines.findIndex((line) => /^\s*\[/.test(line));
+    const limit = firstSection < 0 ? lines.length : firstSection;
+    for (let index = 0; index < limit; index += 1) {
+        if (pattern.test(lines[index])) { lines[index] = `${key} = ${value}`; return lines.join(newline); }
+    }
+    lines.unshift(`${key} = ${value}`);
     return lines.join(newline);
 }
 
@@ -181,19 +215,25 @@ export function updateProviderConfig(configText, provider, profile) {
 function inferPermission(lines) {
     const sandboxMode = readTopLevelString(lines, "sandbox_mode") ?? "workspace-write";
     const approvalPolicy = readTopLevelString(lines, "approval_policy") ?? "on-request";
-    return Object.entries(PERMISSIONS).find(([, item]) => item.sandboxMode === sandboxMode && item.approvalPolicy === approvalPolicy)?.[0] ?? "workspace";
+    return Object.entries(PERMISSIONS).find(([, item]) => item.sandboxMode === sandboxMode && item.approvalPolicy === approvalPolicy)?.[0] ?? defaultPermissionForPlatform();
 }
 
-function profileView(profile, activeId) {
+export function defaultPermissionForPlatform(platform = process.platform) {
+    return platform === "android" ? "full" : "workspace";
+}
+
+export function profileView(profile, activeId) {
     const key = typeof profile.apiKey === "string" ? profile.apiKey : "";
     return {
         id: profile.id, name: profile.name, baseUrl: profile.baseUrl,
         reasoningEffort: profile.reasoningEffort, permission: profile.permission,
         wireApi: profile.wireApi === "chat" ? "chat" : "responses",
         model: typeof profile.model === "string" ? profile.model : "",
-        models: Array.isArray(profile.models) ? profile.models : [],
+        models: normalizeProfileModelIds(Array.isArray(profile.models) ? profile.models : [], profile.model),
+        contextWindowMaxTokens: Number.isInteger(profile.contextWindowMaxTokens) ? profile.contextWindowMaxTokens : null,
         busyRetryEnabled: profile.busyRetryEnabled === true,
         busyRetryAttempts: [3, 6, 10, 20].includes(profile.busyRetryAttempts) ? profile.busyRetryAttempts : 6,
+        busyRetryDelayMs: normalizeBusyRetryDelayMs(profile.busyRetryDelayMs),
         active: profile.id === activeId, apiKeyConfigured: Boolean(key),
         apiKeyPreview: key ? `****${key.slice(-4)}` : null,
     };
@@ -211,7 +251,7 @@ function loadState() {
     let activeId = typeof existing.activeId === "string" ? existing.activeId : null;
     if (!profiles.length) {
         const id = `provider_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-        profiles = [{ id, name: activeProvider, baseUrl, apiKey: typeof auth.OPENAI_API_KEY === "string" ? auth.OPENAI_API_KEY : "", reasoningEffort: readTopLevelString(lines, "model_reasoning_effort") ?? "medium", permission: inferPermission(lines), wireApi: "responses", model: readTopLevelString(lines, "model") ?? "", models: [] }];
+        profiles = [{ id, name: activeProvider, baseUrl, apiKey: typeof auth.OPENAI_API_KEY === "string" ? auth.OPENAI_API_KEY : "", reasoningEffort: readTopLevelString(lines, "model_reasoning_effort") ?? "medium", permission: inferPermission(lines), wireApi: "responses", model: readTopLevelString(lines, "model") ?? "", models: [], contextWindowMaxTokens: normalizeContextWindowTokens(readTopLevelNumber(lines, "model_context_window")) }];
         activeId = id;
         writePrivateFileAtomic(paths.profilesPath, `${JSON.stringify({ version: 1, activeId, profiles }, null, 2)}\n`);
     }
@@ -220,7 +260,111 @@ function loadState() {
 }
 
 function publicState(state) {
-    return { activeId: state.activeId, profiles: state.profiles.map((item) => profileView(item, state.activeId)), reasoningEfforts: [...REASONING_EFFORTS], permissions: Object.keys(PERMISSIONS), wireApis: [...WIRE_APIS] };
+    const activeProfile = state.profiles.find((item) => item.id === state.activeId);
+    const modelCatalogValid = state.paths
+        ? customModelCatalogMatches(readJsonObjectOrEmpty(state.paths.customModelsPath), activeProfile?.models ?? [])
+        : true;
+    return { activeId: state.activeId, profiles: state.profiles.map((item) => profileView(item, state.activeId)), reasoningEfforts: [...REASONING_EFFORTS], permissions: Object.keys(PERMISSIONS), wireApis: [...WIRE_APIS], retryStatus: getCodexRetryStatus(), modelCatalogValid };
+}
+
+function normalizeProfileModelId(value) {
+    if (typeof value !== "string") throw new Error("Codex model id must be a string");
+    const id = value.trim();
+    if (!id) return "";
+    if (id.length > 200 || /[\0\r\n]/u.test(id)) throw new Error("Codex model id is invalid");
+    return id;
+}
+
+export function normalizeProfileModelIds(inputModels, selectedModel, existingModels = []) {
+    const source = inputModels === undefined ? existingModels : inputModels;
+    if (!Array.isArray(source)) throw new Error("Codex profile models must be an array");
+    const ids = new Set();
+    for (const value of source) {
+        const id = normalizeProfileModelId(value);
+        if (id) ids.add(id);
+    }
+    const selected = selectedModel == null ? "" : normalizeProfileModelId(selectedModel);
+    if (selected) ids.add(selected);
+    return [...ids].sort();
+}
+
+export function normalizeContextWindowTokens(value, fallback = null) {
+    const candidate = value === undefined ? fallback : value;
+    if (candidate === null || candidate === "") return null;
+    const numeric = Number(candidate);
+    if (!Number.isInteger(numeric) || numeric < MIN_CONTEXT_WINDOW_TOKENS || numeric > MAX_CONTEXT_WINDOW_TOKENS) {
+        throw new Error(`Codex context window must be an integer from ${MIN_CONTEXT_WINDOW_TOKENS} to ${MAX_CONTEXT_WINDOW_TOKENS} tokens`);
+    }
+    return numeric;
+}
+
+export function normalizeBusyRetryDelayMs(value, fallback = DEFAULT_BUSY_RETRY_DELAY_MS) {
+    const candidate = value === undefined || value === null || value === "" ? fallback : value;
+    const numeric = Number(candidate);
+    if (!Number.isInteger(numeric) || numeric < MIN_BUSY_RETRY_DELAY_MS || numeric > MAX_BUSY_RETRY_DELAY_MS) {
+        return DEFAULT_BUSY_RETRY_DELAY_MS;
+    }
+    return numeric;
+}
+
+export function updateModelContextWindow(configText, value) {
+    const contextWindow = normalizeContextWindowTokens(value);
+    return contextWindow === null
+        ? removeTopLevelKey(configText, "model_context_window")
+        : setTopLevelNumber(configText, "model_context_window", contextWindow);
+}
+
+export function updateModelCatalogPath(configText, catalogPath) {
+    if (typeof catalogPath !== "string" || !catalogPath.trim()) throw new Error("Codex model catalog path is required");
+    return setTopLevelString(configText, "model_catalog_json", catalogPath.trim().replace(/\\/gu, "/"));
+}
+
+function buildCustomModelEntry(slug) {
+    const displayName = slug === "glm-5.2" ? "GLM-5.2" : slug;
+    return {
+        slug,
+        display_name: displayName,
+        description: `${displayName} via the configured provider.`,
+        default_reasoning_level: "max",
+        supported_reasoning_levels: [
+            { effort: "low", description: "Fast responses with lighter reasoning" },
+            { effort: "medium", description: "Balances speed and reasoning depth" },
+            { effort: "high", description: "Greater reasoning depth" },
+            { effort: "xhigh", description: "Extra high reasoning depth" },
+            { effort: "max", description: "Maximum reasoning depth" },
+        ],
+        shell_type: "shell_command",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 1,
+        availability_nux: null,
+        upgrade: null,
+        support_verbosity: true,
+        default_verbosity: "low",
+        supports_reasoning_summaries: true,
+        supports_parallel_tool_calls: true,
+        supports_search_tool: true,
+        supports_image_detail_original: true,
+        input_modalities: ["text", "image"],
+        truncation_policy: { mode: "tokens", limit: 1_000_000 },
+        web_search_tool_type: "text_and_image",
+        experimental_supported_tools: [],
+        apply_patch_tool_type: "freeform",
+        base_instructions: "",
+        context_window: 1_000_000,
+        effective_context_window_percent: 100,
+        max_context_window: 1_000_000,
+    };
+}
+
+export function buildCustomModelCatalog(modelIds = []) {
+    const ids = normalizeProfileModelIds(modelIds, "");
+    return { models: ids.map(buildCustomModelEntry) };
+}
+
+export function customModelCatalogMatches(catalog, modelIds = []) {
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return false;
+    return JSON.stringify(catalog) === JSON.stringify(buildCustomModelCatalog(modelIds));
 }
 
 function validateProfileInput(input, existing) {
@@ -230,20 +374,23 @@ function validateProfileInput(input, existing) {
     if (!REASONING_EFFORTS.has(reasoningEffort)) throw new Error("Unsupported reasoning effort");
     const permission = input.permission;
     if (!PERMISSIONS[permission]) throw new Error("Unsupported permission preset");
-    let apiKey = existing?.apiKey ?? "";
+    const baseUrl = normalizeBaseUrl(input.baseUrl);
+    let apiKey = canReuseApiKey(existing?.baseUrl, baseUrl) ? (existing?.apiKey ?? "") : "";
     if (input.clearApiKey === true) apiKey = "";
     else if (typeof input.apiKey === "string" && input.apiKey.trim()) {
         apiKey = input.apiKey.trim();
         if (apiKey.length > 65536 || /[\r\n]/.test(apiKey)) throw new Error("API key contains invalid characters");
     }
     const wireApi = WIRE_APIS.has(input.wireApi) ? input.wireApi : "responses";
-    const model = typeof input.model === "string" ? input.model.trim().slice(0, 200) : (existing?.model ?? "");
-    const models = Array.isArray(existing?.models) ? existing.models : [];
+    const model = normalizeProfileModelId(typeof input.model === "string" ? input.model : (existing?.model ?? ""));
+    const models = normalizeProfileModelIds(input.models, model, Array.isArray(existing?.models) ? existing.models : []);
+    const contextWindowMaxTokens = normalizeContextWindowTokens(input.contextWindowMaxTokens, existing?.contextWindowMaxTokens ?? null);
     const busyRetryEnabled = input.busyRetryEnabled === true ||
         (input.busyRetryEnabled === undefined && existing?.busyRetryEnabled === true);
     const requestedAttempts = Number(input.busyRetryAttempts ?? existing?.busyRetryAttempts ?? 6);
     const busyRetryAttempts = [3, 6, 10, 20].includes(requestedAttempts) ? requestedAttempts : 6;
-    return { name, baseUrl: normalizeBaseUrl(input.baseUrl), reasoningEffort, permission, apiKey, wireApi, model, models, busyRetryEnabled, busyRetryAttempts };
+    const busyRetryDelayMs = normalizeBusyRetryDelayMs(input.busyRetryDelayMs, existing?.busyRetryDelayMs);
+    return { name, baseUrl, reasoningEffort, permission, apiKey, wireApi, model, models, contextWindowMaxTokens, busyRetryEnabled, busyRetryAttempts, busyRetryDelayMs };
 }
 
 function syncProfileToCodexFiles(state, profile) {
@@ -252,13 +399,26 @@ function syncProfileToCodexFiles(state, profile) {
     config = setTopLevelString(config, "model_reasoning_effort", profile.reasoningEffort);
     if (profile.model) config = setTopLevelString(config, "model", profile.model);
     else config = removeTopLevelKey(config, "model");
+    config = updateModelContextWindow(config, profile.contextWindowMaxTokens);
+    config = updateModelCatalogPath(config, state.paths.customModelsPath);
     config = setTopLevelString(config, "sandbox_mode", PERMISSIONS[profile.permission].sandboxMode);
     config = setTopLevelString(config, "approval_policy", PERMISSIONS[profile.permission].approvalPolicy);
     config = setSectionBoolean(config, "features", "remote_compaction_v2", false);
     writePrivateFileAtomic(state.paths.configPath, config);
+    writePrivateFileAtomic(state.paths.customModelsPath, `${JSON.stringify(buildCustomModelCatalog(profile.models), null, 2)}\n`);
     const auth = { ...state.auth };
     if (profile.apiKey) auth.OPENAI_API_KEY = profile.apiKey; else delete auth.OPENAI_API_KEY;
     writePrivateFileAtomic(state.paths.authPath, `${JSON.stringify(auth, null, 2)}\n`);
+}
+
+export function repairActiveCodexFilesIfNeeded(state, dependencies = {}) {
+    const profile = state.profiles.find((item) => item.id === state.activeId);
+    if (!profile || !state.paths) return false;
+    const readCatalog = dependencies.readCatalog ?? readJsonObjectOrEmpty;
+    if (customModelCatalogMatches(readCatalog(state.paths.customModelsPath), profile.models ?? [])) return false;
+    const syncCodexFiles = dependencies.syncProfileToCodexFiles ?? syncProfileToCodexFiles;
+    syncCodexFiles(state, profile);
+    return true;
 }
 
 function saveProfiles(state) {
@@ -319,16 +479,20 @@ async function fetchProfileModels(profile) {
     } finally { clearTimeout(timer); }
 }
 
-async function handleAction(body) {
-    const state = loadState();
+export async function handleCodexConfigAction(body, dependencies = {}) {
+    const state = (dependencies.loadState ?? loadState)();
+    const persistProfiles = dependencies.saveProfiles ?? saveProfiles;
+    const syncCodexFiles = dependencies.syncProfileToCodexFiles ?? syncProfileToCodexFiles;
     if (body.action === "select-model") {
         const profile = state.profiles.find((item) => item.id === body.id);
         if (!profile) throw new Error("Provider profile not found");
         const model = typeof body.model === "string" ? body.model.trim() : "";
         if (!model || model.length > 200 || /[\r\n]/.test(model)) throw new Error("A valid model ID is required");
         profile.model = model;
+        profile.models = normalizeProfileModelIds(Array.isArray(profile.models) ? profile.models : [], model);
         state.activeId = profile.id;
-        saveProfiles(state);
+        syncCodexFiles(state, profile);
+        persistProfiles(state);
         return publicState(state);
     }
     if (body.action === "select-permission") {
@@ -337,7 +501,8 @@ async function handleAction(body) {
         if (!PERMISSIONS[body.permission]) throw new Error("Unsupported permission preset");
         profile.permission = body.permission;
         state.activeId = profile.id;
-        saveProfiles(state);
+        syncCodexFiles(state, profile);
+        persistProfiles(state);
         return publicState(state);
     }
     if (body.action === "busy-retry-toggle") {
@@ -345,39 +510,44 @@ async function handleAction(body) {
         if (!profile) throw new Error("Provider profile not found");
         profile.busyRetryEnabled = body.enabled === true;
         state.activeId = profile.id;
-        saveProfiles(state);
+        persistProfiles(state);
         return publicState(state);
     }
     if (body.action === "models") {
         const existing = state.profiles.find((item) => item.id === body.id);
         const profile = validateProfileInput(body, existing);
-        profile.models = await fetchProfileModels(profile);
+        profile.models = normalizeProfileModelIds(await fetchProfileModels(profile), profile.model);
         if (existing) {
             existing.models = profile.models;
-            saveProfiles(state);
+            persistProfiles(state);
         }
         return { ...publicState(state), fetchedModels: profile.models };
     }
     if (body.action === "delete") {
         if (state.profiles.length <= 1) throw new Error("At least one provider profile is required");
+        const deletedActiveProfile = state.activeId === body.id;
         state.profiles = state.profiles.filter((item) => item.id !== body.id);
-        if (state.activeId === body.id) state.activeId = state.profiles[0].id;
-        saveProfiles(state);
+        if (deletedActiveProfile) {
+            state.activeId = state.profiles[0].id;
+            syncCodexFiles(state, state.profiles[0]);
+        }
+        persistProfiles(state);
         return publicState(state);
     }
     if (body.action === "activate") {
         const profile = state.profiles.find((item) => item.id === body.id);
         if (!profile) throw new Error("Provider profile not found");
         state.activeId = profile.id;
-        saveProfiles(state);
+        syncCodexFiles(state, profile);
+        persistProfiles(state);
         return publicState(state);
     }
     if (body.action === "sync-cli") {
         const profile = state.profiles.find((item) => item.id === body.id);
         if (!profile) throw new Error("Provider profile not found");
         state.activeId = profile.id;
-        syncProfileToCodexFiles(state, profile);
-        saveProfiles(state);
+        syncCodexFiles(state, profile);
+        persistProfiles(state);
         return { ...publicState(state), cliSynced: true };
     }
     if (body.action !== "save") throw new Error("Unsupported action");
@@ -390,7 +560,8 @@ async function handleAction(body) {
         state.profiles.push(profile);
     }
     state.activeId = profile.id;
-    saveProfiles(state);
+    syncCodexFiles(state, profile);
+    persistProfiles(state);
     return publicState(state);
 }
 
@@ -401,12 +572,16 @@ export function createCodexConfigRouteHandlers() {
     return {
         get(req, res) {
             if (!isLoopbackRequest(req)) return sendError(res, 403, new Error("Codex settings are only available from localhost"));
-            try { res.json(publicState(loadState())); } catch (error) { sendError(res, 500, error); }
+            try {
+                const state = loadState();
+                repairActiveCodexFilesIfNeeded(state);
+                res.json(publicState(state));
+            } catch (error) { sendError(res, 500, error); }
         },
         post(req, res) {
             if (!isLoopbackRequest(req)) return sendError(res, 403, new Error("Codex settings are only available from localhost"));
             if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return sendError(res, 400, new Error("Expected a JSON object"));
-            Promise.resolve(handleAction(req.body)).then((result) => res.json({ ...result, saved: true })).catch((error) => sendError(res, 400, error));
+            Promise.resolve(handleCodexConfigAction(req.body)).then((result) => res.json({ ...result, saved: true })).catch((error) => sendError(res, 400, error));
         },
     };
 }
