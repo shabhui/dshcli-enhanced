@@ -71,6 +71,75 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-Sha512Integrity([string]$Path) {
+    $hex = (Get-FileHash -Algorithm SHA512 -LiteralPath $Path).Hash
+    $bytes = New-Object byte[] ($hex.Length / 2)
+    for ($index = 0; $index -lt $bytes.Length; $index++) {
+        $bytes[$index] = [Convert]::ToByte($hex.Substring($index * 2, 2), 16)
+    }
+    return 'sha512-' + [Convert]::ToBase64String($bytes)
+}
+
+function Get-LockPackage([string]$LockFile, [string]$PackagePath) {
+    $resolved = & node.exe -p "JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).packages[process.argv[2]].resolved" $LockFile $PackagePath
+    $resolvedExitCode = $LASTEXITCODE
+    $integrity = & node.exe -p "JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8')).packages[process.argv[2]].integrity" $LockFile $PackagePath
+    $integrityExitCode = $LASTEXITCODE
+    if ($resolvedExitCode -ne 0 -or $integrityExitCode -ne 0 -or
+        [string]::IsNullOrWhiteSpace($resolved) -or [string]::IsNullOrWhiteSpace($integrity)) {
+        throw "Npm lock entry is missing: $PackagePath"
+    }
+    return [pscustomobject]@{
+        resolved = [string]$resolved
+        integrity = [string]$integrity
+    }
+}
+
+function Stage-CodexAndroidPackage(
+    [string]$LockFile,
+    [string]$DestinationRoot,
+    [string]$Readelf
+) {
+    $packagePath = 'node_modules/@openai/codex-linux-arm64'
+    $entry = Get-LockPackage $LockFile $packagePath
+    if ([string]::IsNullOrWhiteSpace($entry.resolved) -or
+        [string]::IsNullOrWhiteSpace($entry.integrity)) {
+        throw "Codex Android lock metadata is incomplete: $packagePath"
+    }
+
+    $archive = Join-Path $DestinationRoot 'codex-linux-arm64.tgz'
+    Invoke-WebRequest -UseBasicParsing -Uri $entry.resolved -OutFile $archive
+    if ((Get-Sha512Integrity $archive) -ne $entry.integrity) {
+        throw 'Downloaded Codex Android package failed npm integrity verification'
+    }
+
+    $packageDirectory = Join-Path $DestinationRoot ($packagePath -replace '/', '\')
+    New-Item -ItemType Directory -Force -Path $packageDirectory | Out-Null
+    & tar.exe -xzf $archive --strip-components 1 -C $packageDirectory
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to extract the Codex Android package'
+    }
+
+    $wrapper = Join-Path $DestinationRoot 'node_modules\@openai\codex\bin\codex.js'
+    if (!(Test-Path -LiteralPath $wrapper -PathType Leaf) -or
+        !(Get-Content -Raw -LiteralPath $wrapper).Contains('case "android":')) {
+        throw 'Bundled Codex wrapper does not support Android'
+    }
+
+    $binary = Join-Path $packageDirectory 'vendor\aarch64-unknown-linux-musl\bin\codex'
+    if (!(Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw 'Bundled Codex Android binary is missing'
+    }
+    $programHeaders = & $Readelf -l $binary
+    if ($LASTEXITCODE -ne 0 -or $programHeaders -match '\bINTERP\b') {
+        throw 'Codex Android binary must be statically linked'
+    }
+    $dynamicSection = & $Readelf -d $binary
+    if ($LASTEXITCODE -ne 0 -or $dynamicSection -match '\(NEEDED\)') {
+        throw 'Codex Android binary must not require desktop Linux shared libraries'
+    }
+}
+
 function Get-AsciiOccurrenceCount([string]$Text, [string]$Needle) {
     $count = 0
     $offset = 0
@@ -228,6 +297,12 @@ function Assert-RuntimePayload {
     if ($paseoEntries -notcontains 'node_modules/@getpaseo/server/package.json') {
         throw 'Bundled Paseo server is missing'
     }
+    if ($paseoEntries -notcontains 'node_modules/@openai/codex/bin/codex.js') {
+        throw 'Bundled Codex wrapper is missing'
+    }
+    if ($paseoEntries -notcontains 'node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex') {
+        throw 'Bundled Codex Android binary is missing'
+    }
     if ($paseoEntries -notcontains 'node_modules/node-pty/prebuilds/android-arm64/pty.node') {
         throw 'Bundled Android node-pty module is missing'
     }
@@ -305,6 +380,8 @@ try {
     if (!(Test-Path -LiteralPath $clang -PathType Leaf) -or !(Test-Path -LiteralPath $readelf -PathType Leaf)) {
         throw "Android NDK $ndkVersion is missing from $AndroidSdkRoot"
     }
+
+    Stage-CodexAndroidPackage $lockFile $temporary $readelf
 
     $nodePackage = Join-Path $debDirectory 'nodejs-lts_24.18.0-1_aarch64.deb'
     $nativeStage = Join-Path $temporary '.android-native'
