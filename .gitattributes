@@ -1,0 +1,8 @@
+# The bundled Android runtime tarballs are generated build artifacts, not source.
+# `paseo-node-modules-arm64.tgz` carries the official @openai/codex static musl
+# binary (~212 MB uncompressed), which pushes the archive past GitHub's 100 MB
+# per-file hard limit, so both runtime tarballs go through Git LFS.
+# Regenerate them with scripts/prepare-android-runtime.ps1; the SHA256 digests in
+# packages/manifest.txt must be updated in the same commit or the on-device
+# installer rejects the payload.
+ZeroTermux-main/app/src/main/assets/paseo-runtime/packages/*.tgz filter=lfs diff=lfs merge=lfs -text

@@ -5,6 +5,20 @@
 /build/
 /data/
 /docs/superpowers/
+/.playwright-cli/
 android/build/
 /android/releases/*.apk
 node_modules/
+
+# Agent debug dumps (screenshots, uiautomator XML, runtime tarballs)
+/.codex-*
+/.tmp-*
+
+# Android build outputs and one-off build logs
+ZeroTermux-main/.gradle/
+ZeroTermux-main/**/build/
+*.stale-*
+ZeroTermux-main/*.log
+
+# Local build/inspection artifacts, not source
+/output/
