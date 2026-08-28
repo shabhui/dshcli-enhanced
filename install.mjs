@@ -4,6 +4,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -65,8 +66,88 @@ function writeJsonAtomic(filePath, value) {
   renameSync(temporary, filePath);
 }
 
+function writeCompressedVariants(filePath, source) {
+  const bytes = Buffer.from(source);
+  writeFileSync(`${filePath}.gz`, gzipSync(bytes, { level: 9 }));
+  writeFileSync(`${filePath}.br`, brotliCompressSync(bytes, {
+    params: { [constants.BROTLI_PARAM_QUALITY]: 11 },
+  }));
+}
+
+function patchStandaloneLoopbackTransport(webRoot) {
+  const original = 'e.normalizeLoopbackToLocalhost=function(t){const{host:o,port:n,isIpv6:s}=c(t);if("127.0.0.1"===o||!s&&"0.0.0.0"===o)return`localhost:${n}`;if(s&&("::1"===o||"::"===o))return`localhost:${n}`;return t}';
+  const replacement = 'e.normalizeLoopbackToLocalhost=function(t){const{host:o,port:n,isIpv6:s}=c(t);if(globalThis.__PASEO_STANDALONE_ANDROID__){if("localhost"===o||"127.0.0.1"===o||!s&&"0.0.0.0"===o)return`127.0.0.1:${n}`;if(s&&("::1"===o||"::"===o))return`127.0.0.1:${n}`;return t}if("127.0.0.1"===o||!s&&"0.0.0.0"===o)return`localhost:${n}`;if(s&&("::1"===o||"::"===o))return`localhost:${n}`;return t}';
+  let patchedFiles = 0;
+  const pending = [webRoot];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const target = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(target);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
+      const source = readFileSync(target, "utf8");
+      if (source.includes(replacement)) {
+        patchedFiles += 1;
+        continue;
+      }
+      if (!source.includes(original)) continue;
+      const patched = source.replace(original, replacement);
+      writeFileSync(target, patched);
+      writeCompressedVariants(target, patched);
+      patchedFiles += 1;
+    }
+  }
+  if (patchedFiles !== 1) {
+    throw new Error(`Unable to patch the standalone loopback transport (matched ${patchedFiles} bundles)`);
+  }
+}
+
+function patchAcpAgentSystemPrompt(target) {
+  const originalSource = readFileSync(target, "utf8");
+  let source = originalSource;
+  const callMarker = "prompt: prependACPSystemPrompt(toACPContentBlocks(prompt), this.config.systemPrompt, this.config.daemonAppendSystemPrompt),";
+  const helperMarker = "function toACPContentBlocks(prompt) {";
+  const helper = [
+    "function prependACPSystemPrompt(contentBlocks, systemPrompt, daemonAppendSystemPrompt) {",
+    "  const parts = [systemPrompt, daemonAppendSystemPrompt].filter((value) => typeof value === \"string\" && value.trim()).map((value) => value.trim());",
+    "  if (parts.length === 0) return contentBlocks;",
+    "  return [{ type: \"text\", text: `[Paseo system prompt]\\n${parts.join(\"\\n\\n\")}\\n\\n` }, ...contentBlocks];",
+    "}",
+    "",
+  ].join("\n");
+  const helperStart = "function prependACPSystemPrompt(";
+  const helperStartIndex = source.indexOf(helperStart);
+  const helperMarkerIndex = helperStartIndex >= 0
+    ? source.indexOf(helperMarker, helperStartIndex + helperStart.length)
+    : -1;
+  if (helperStartIndex >= 0 && helperMarkerIndex > helperStartIndex) {
+    source = `${source.slice(0, helperStartIndex)}${helper}${source.slice(helperMarkerIndex)}`;
+  }
+  if (source.includes(callMarker) && source.includes(helperStart)) {
+    if (source !== originalSource) writeFileSync(target, source);
+    return;
+  }
+  if (!source.includes(helperMarker)) {
+    throw new Error(`Unable to patch ACP system prompt helper: marker missing in ${target}`);
+  }
+  const withHelper = source.includes(helperStart)
+    ? source
+    : source.replace(helperMarker, `${helper}${helperMarker}`);
+  const originalCall = "prompt: toACPContentBlocks(prompt),";
+  const callMatches = withHelper.split(originalCall).length - 1;
+  if (callMatches !== 1) {
+    throw new Error(`Unable to patch ACP system prompt call: matched ${callMatches} locations in ${target}`);
+  }
+  const patched = withHelper.replace(originalCall, callMarker);
+  writeFileSync(target, patched);
+}
+
 const serverRoot = findServerRoot(option("--server-root"));
 const paseoHome = path.resolve(option("--paseo-home") || process.env.PASEO_HOME || path.join(homedir(), ".paseo"));
+const standaloneAndroid = process.env.PASEO_STANDALONE_ANDROID === "1";
 const serverVersion = readJson(path.join(serverRoot, "package.json")).version;
 if (serverVersion !== SUPPORTED_SERVER_VERSION && !args.includes("--force")) {
   throw new Error(`仅支持 @getpaseo/server@${SUPPORTED_SERVER_VERSION}，当前为 ${serverVersion || "未知"}。`);
@@ -91,8 +172,13 @@ const serverFiles = [
   ["bootstrap.js", "bootstrap.js"],
   ["session.js", "session.js"],
   ["codex-config.js", "codex-config.js"],
+  ["codex-retry-status.js", "codex-retry-status.js"],
   ["codex-chat-proxy.js", "codex-chat-proxy.js"],
   ["paseo-provider-config.js", "paseo-provider-config.js"],
+  ["paseo-provider-models.js", "paseo-provider-models.js"],
+  ["paseo-agent-cli-installer.js", "paseo-agent-cli-installer.js"],
+  ["paseo-agent-suppliers.js", "paseo-agent-suppliers.js"],
+  ["paseo-pi-model-config.js", "paseo-pi-model-config.js"],
   ["paseo-management.js", "paseo-management.js"],
   ["agent-providers-codex-app-server-agent.js", path.join("agent", "providers", "codex-app-server-agent.js")],
 ];
@@ -112,6 +198,11 @@ for (const [sourceName, relativeTarget] of serverFiles) {
   backup(target, path.join("server", relativeTarget));
   mkdirSync(path.dirname(target), { recursive: true });
   copyFileSync(source, target);
+}
+const acpAgentTarget = path.join(serverCodeRoot, "agent", "providers", "acp-agent.js");
+if (existsSync(acpAgentTarget)) {
+  backup(acpAgentTarget, path.join("server", "agent", "providers", "acp-agent.js"));
+  patchAcpAgentSystemPrompt(acpAgentTarget);
 }
 
 const configPath = path.join(paseoHome, "config.json");
@@ -134,30 +225,47 @@ if (createdWebDir) {
   cpSync(bundledWeb, webDir, { recursive: true });
 }
 
-for (const fileName of ["index.html", "index.html.gz", "index.html.br", "paseo-browser-bootstrap.js", "paseo-manager.js"]) {
+for (const fileName of ["index.html", "index.html.gz", "index.html.br", "paseo-standalone-bootstrap.js", "paseo-browser-bootstrap.js", "paseo-manager.js"]) {
   const target = path.join(webDir, fileName);
   if (!createdWebDir) backup(target, path.join("web", fileName));
 }
 
 copyFileSync(path.join(projectRoot, "web", "paseo-browser-bootstrap.js"), path.join(webDir, "paseo-browser-bootstrap.js"));
 copyFileSync(path.join(projectRoot, "web", "paseo-manager.js"), path.join(webDir, "paseo-manager.js"));
+if (standaloneAndroid) {
+  copyFileSync(path.join(projectRoot, "web", "paseo-standalone-bootstrap.js"), path.join(webDir, "paseo-standalone-bootstrap.js"));
+}
 
 const indexPath = path.join(webDir, "index.html");
+if (standaloneAndroid) {
+  patchStandaloneLoopbackTransport(webDir);
+}
 let html = readFileSync(indexPath, "utf8");
+const upstreamDaemonBootstrap = html.match(/\s*<script id=["']paseo-daemon-bootstrap["'][\s\S]*?<\/script>/u)?.[0]?.trim() || "";
 html = html
+  .replace(/^\s*<script[^>]+src=["']\/paseo-standalone-bootstrap\.js[^>]*><\/script>\s*$/gmu, "")
   .replace(/^\s*<script[^>]+src=["']\/paseo-browser-bootstrap\.js[^>]*><\/script>\s*$/gmu, "")
   .replace(/^\s*<script[^>]+src=["']\/paseo-codex-settings\.js[^>]*><\/script>\s*$/gmu, "")
-  .replace(/^\s*<script[^>]+src=["']\/paseo-manager\.js[^>]*><\/script>\s*$/gmu, "");
+  .replace(/^\s*<script[^>]+src=["']\/paseo-manager\.js[^>]*><\/script>\s*$/gmu, "")
+  .replace(/\s*<script id=["']paseo-daemon-bootstrap["'][\s\S]*?<\/script>/gmu, "");
+const daemonBootstrap = standaloneAndroid
+  ? '  <script id="paseo-daemon-bootstrap">window.__PASEO_INITIAL_DAEMON_CONNECTION__ = { listen: window.location.host, useTls: false };</script>'
+  : upstreamDaemonBootstrap;
+const standaloneBootstrap = standaloneAndroid
+  ? '  <script src="/paseo-standalone-bootstrap.js?v=standalone-v1"></script>'
+  : "";
 const injection = [
   '  <script src="/paseo-browser-bootstrap.js?v=enhanced-1" defer></script>',
   '  <script src="/paseo-manager.js?v=enhanced-1" defer></script>',
 ].join("\n");
 if (!html.includes("</body>")) throw new Error("Web UI index.html 缺少 </body>。");
+if (!html.includes("<head>")) throw new Error("Web UI index.html 缺少 <head>。");
 html = html.replace(/<html\s+lang=["'][^"']+["']/i, '<html lang="zh-CN"');
 if (!html.includes('id="paseo-viewport-fix"')) {
   const viewportStyle = '<style id="paseo-viewport-fix">html,body,#root{height:var(--paseo-viewport-height,100dvh)!important;min-height:0!important}#root{max-height:var(--paseo-viewport-height,100dvh)}</style>';
   html = html.replace("</head>", `${viewportStyle}\n</head>`);
 }
+html = html.replace("<head>", `<head>\n${daemonBootstrap}${standaloneBootstrap ? `\n${standaloneBootstrap}` : ""}`);
 html = html.replace("</body>", `${injection}\n</body>`);
 writeFileSync(indexPath, html);
 writeFileSync(`${indexPath}.gz`, gzipSync(Buffer.from(html), { level: 9 }));

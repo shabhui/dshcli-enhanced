@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/check.mjs",
+    "check:upstream": "node scripts/upstream-compatibility.mjs",
     "install:local": "node install.mjs",
     "uninstall:local": "node uninstall.mjs"
   },

@@ -14,6 +14,8 @@ Paseo 的运行方式，只增加本地管理界面、供应商切换和移动�
 - 插件导入、启停和删除。
 - Android 软键盘避让，输入框不会被 IME 覆盖。
 - 紧凑型侧边管理面板，避免遮挡 Paseo 原有顶栏和输入区。
+- 控制台内置 Agent CLI 管理：可在 App 私有目录安装、重装和更新 Paseo CLI 与已验证的 Codex CLI，也可添加自己的 OpenCode、Pi、ACP 或其他 CLI。
+- Paseo 原生 Provider 继续由 Paseo 管理；自定义 CLI 添加后会自动注册为可切换 Provider，适配器、命令、来源和版本都能在控制台指定。
 
 ## 兼容性
 
@@ -68,7 +70,7 @@ npm install -g @getpaseo/cli@0.3.1
 
 独立 arm64 APK 作为 `v2.3.2` GitHub Release 附件发布；本地构建产物位于
 `android/releases/PaseoEnhanced-v2.3.2-arm64.apk`，不纳入 Git 跟踪。它已经内置 Termux
-bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.3 和 Android arm64
+bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.6、内置 Codex CLI 0.147.0 和 Android arm64
 原生模块，不需要另外安装 ZeroTermux 或 Termux。首次启动会在应用私有目录离线
 安装这些运行文件，启动 Paseo Daemon，等待 `http://127.0.0.1:6767/` 就绪后直接
 打开 Web UI。`v2.3.2` 修复了 Windows 构建生成 CRLF runtime manifest 时首次安装误报
@@ -81,6 +83,21 @@ Android 工程位于 `ZeroTermux-main/`，离线运行时准备脚本位于
 `scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.paseoe`，可以与原来的
 ZeroTermux (`com.termux`) 共存；Termux Java namespace 仍保留为 `com.termux`，
 bootstrap 和运行时前缀已迁移到 `/data/data/com.paseoe/files/usr`。
+
+### Agent CLI 安装与更新
+
+打开 Paseo 控制台的“安装 Agent CLI（含 Paseo CLI）”折叠区即可操作。安装内容只会写入
+`$HOME/.paseo-app/agents`，不会读取或复用另一个 Termux/ZeroTermux 的前缀。Paseo 和
+Codex 的内置安装项受保护；Paseo 原生的 OpenCode、Pi、Claude、Copilot、OMP 等 Provider
+仍然保留，可使用同名 CLI ID 安装自己选择的实现来补齐命令，而不是删除原生适配器。
+
+控制台提供可编辑的 OpenCode/Pi 模板，也允许自行填写 CLI ID、显示名称、适配器、启动参数，
+并从 npm 包、HTTPS URL 或 App 运行时文件安装。npm 来源可以分别指定首次安装包、更新包、
+`package.json` 中的 `bin` 名称和 HTTPS Registry；安装后会读取真实包版本与入口，立即注册到
+上方 Agent 选择器供直接切换。再次提交同一个自定义 ID 会更新定义，列表中的“更新”会按新来源
+原子替换旧版本。npm lifecycle scripts 默认关闭，只有勾选“允许 npm 安装脚本”才会执行；
+URL 来源支持为安装和更新分别填写 SHA-256。任意第三方 CLI 仍需自身兼容 Android arm64，
+控制台不会把普通桌面包伪装成已验证的 Android 包。
 
 ## 安全说明
 
@@ -95,7 +112,16 @@ bootstrap 和运行时前缀已迁移到 `/data/data/com.paseoe/files/usr`。
 ## 上游更新
 
 本项目采用版本锁定补丁，不能假设未来 Paseo 文件结构不变。升级官方 Paseo 前，
-先运行 `npm run check`；若版本变化，应重新基于对应 npm 包审查差异，而不是强制覆盖。
+先运行兼容性检查：
+
+```sh
+npm run check:upstream -- --server-root /path/to/@getpaseo/server
+```
+
+检查器是只读的，会同时检查版本和补丁依赖的入口点。只有输出 `supported` 时才建议
+运行 `node install.mjs`；如果输出 `review-required`，它会列出版本漂移或缺失的文件，
+便于把上游更新逐项对照后再调整补丁，不需要盲目使用 `--force`。完成调整后再运行
+`npm run check` 和 `node --test tests/*.test.mjs`。
 
 ## 第三方声明与 License
 
