@@ -5,6 +5,9 @@ import android.content.res.AssetManager;
 import android.os.Handler;
 import android.os.Looper;
 
+import com.termux.R;
+import com.termux.app.TermuxInstaller;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -37,30 +40,43 @@ public final class PaseoRuntimeController {
     private File homeDirectory;
     private Process startupProcess;
     private boolean finished;
+    private boolean repairOnRetry;
     private long runGeneration;
     private String currentRunId;
+    private int selectedPort = PaseoPortConfig.DEFAULT_PORT;
 
     private final Runnable statusPoll = new Runnable() {
         @Override
         public void run() {
             if (finished) return;
             PaseoRuntimeState state = readState();
-            dispatch(state);
-            if (state.phase() != PaseoRuntimeState.Phase.READY &&
+            if (startupProcess != null && processHasExited(startupProcess) &&
                 state.phase() != PaseoRuntimeState.Phase.ERROR) {
+                state = new PaseoRuntimeState(PaseoRuntimeState.Phase.ERROR,
+                    text(R.string.paseo_status_daemon_stopped, "Paseo daemon stopped unexpectedly"));
+            }
+            dispatch(state);
+            if (state.phase() != PaseoRuntimeState.Phase.ERROR) {
                 handler.postDelayed(this, STATUS_POLL_MS);
             }
         }
     };
 
     public void start(Activity activity, Listener listener) {
+        start(activity, listener, PaseoPortConfig.DEFAULT_PORT);
+    }
+
+    public void start(Activity activity, Listener listener, int port) {
         this.activity = activity;
         this.listener = listener;
+        this.selectedPort = PaseoPortConfig.normalize(port);
         this.finished = false;
+        this.repairOnRetry = false;
         this.runGeneration++;
         this.currentRunId = null;
-        this.homeDirectory = new File(activity.getFilesDir(), "paseo-home");
-        dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Preparing the embedded Paseo runtime"));
+        this.homeDirectory = PaseoHome.directory(activity.getFilesDir());
+        dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
+            text(R.string.paseo_status_preparing_runtime, "Preparing the embedded Paseo runtime")));
         preparePaseoRuntime(runGeneration);
     }
 
@@ -68,8 +84,12 @@ public final class PaseoRuntimeController {
         if (activity == null || listener == null) return;
         Activity currentActivity = activity;
         Listener currentListener = listener;
+        File currentHome = homeDirectory;
+        int currentPort = selectedPort;
+        boolean repair = repairOnRetry;
         stop();
-        start(currentActivity, currentListener);
+        if (repair && currentHome != null) invalidateRuntimeMarkers(currentHome);
+        start(currentActivity, currentListener, currentPort);
     }
 
     public void stop() {
@@ -89,9 +109,18 @@ public final class PaseoRuntimeController {
     private void preparePaseoRuntime(long generation) {
         if (!isCurrentRun(generation) || activity == null || homeDirectory == null) return;
 
+        dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
+            text(R.string.paseo_status_preparing_terminal, "Preparing the embedded terminal")));
+        TermuxInstaller.setupBootstrapIfNeeded(activity, () -> prepareOverlayRuntime(generation));
+    }
+
+    private void prepareOverlayRuntime(long generation) {
+        if (!isCurrentRun(generation) || activity == null || homeDirectory == null) return;
+
         AssetManager assets = activity.getApplicationContext().getAssets();
         File runtimeDirectory = new File(homeDirectory, ".paseo-app/runtime");
-        dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Installing the embedded Paseo runtime"));
+        dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
+            text(R.string.paseo_status_installing_runtime, "Installing the embedded Paseo runtime")));
         runtimePreparer.prepare(
             () -> {
                 ensureDirectory(homeDirectory);
@@ -115,7 +144,8 @@ public final class PaseoRuntimeController {
             String runId = UUID.randomUUID().toString();
             currentRunId = runId;
             ProcessBuilder processBuilder = new ProcessBuilder(
-                "/system/bin/sh", script.getAbsolutePath(), runId);
+                "/system/bin/sh", script.getAbsolutePath(), runId,
+                String.valueOf(selectedPort));
             processBuilder.directory(homeDirectory);
             Map<String, String> environment = processBuilder.environment();
             PaseoProcessEnvironment.apply(environment, activity.getFilesDir());
@@ -131,16 +161,18 @@ public final class PaseoRuntimeController {
 
     private PaseoRuntimeState readState() {
         String expectedRunId = currentRunId;
+        String waitingForRuntime = text(R.string.paseo_status_waiting_runtime, "Waiting for the embedded Paseo runtime");
         if (expectedRunId == null) {
-            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Waiting for the embedded Paseo runtime");
+            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, waitingForRuntime);
         }
         File currentHome = homeDirectory;
         if (currentHome == null) {
-            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Waiting for the embedded Paseo runtime");
+            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, waitingForRuntime);
         }
         File statusFile = new File(currentHome, ".paseo-app/status-" + expectedRunId);
         if (!statusFile.isFile()) {
-            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Installing the embedded Paseo runtime");
+            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
+                text(R.string.paseo_status_installing_runtime, "Installing the embedded Paseo runtime"));
         }
         StringBuilder contents = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
@@ -152,7 +184,21 @@ public final class PaseoRuntimeController {
             }
             return PaseoRunStatus.parse(expectedRunId, contents.toString());
         } catch (IOException error) {
-            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, "Waiting for the embedded runtime");
+            return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
+                text(R.string.paseo_status_waiting_embedded_runtime, "Waiting for the embedded runtime"));
+        }
+    }
+
+    // The status poll and the stop path race: stop() clears `activity` (line 103) while a queued
+    // poll can still call readState(). Fall back to the English literal rather than crash, since a
+    // status string is never worth taking the startup screen down for.
+    private String text(int resourceId, String fallback) {
+        Activity current = activity;
+        if (current == null) return fallback;
+        try {
+            return current.getString(resourceId);
+        } catch (RuntimeException error) {
+            return fallback;
         }
     }
 
@@ -161,7 +207,24 @@ public final class PaseoRuntimeController {
     }
 
     private void dispatch(PaseoRuntimeState state) {
+        if (state.phase() == PaseoRuntimeState.Phase.ERROR) repairOnRetry = true;
         if (listener != null) listener.onState(state);
+    }
+
+    private static void invalidateRuntimeMarkers(File homeDirectory) {
+        File appDirectory = new File(homeDirectory, ".paseo-app");
+        new File(appDirectory, "runtime/asset-fingerprint").delete();
+        new File(appDirectory, "runtime-version").delete();
+        new File(appDirectory, "enhanced-fingerprint").delete();
+    }
+
+    static boolean processHasExited(Process process) {
+        try {
+            process.exitValue();
+            return true;
+        } catch (IllegalThreadStateException running) {
+            return false;
+        }
     }
 
     private static String messageFor(Exception error) {

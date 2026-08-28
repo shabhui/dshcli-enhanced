@@ -24,7 +24,8 @@ public class PaseoProcessEnvironmentTest {
 
         assertFalse(inherited.containsKey("LD_PRELOAD"));
         assertFalse(inherited.containsKey("LD_LIBRARY_PATH"));
-        assertEquals(new File(filesDirectory, "paseo-home").getAbsolutePath(), inherited.get("HOME"));
+        // Unified with the Termux session HOME (TermuxConstants.TERMUX_HOME_DIR_PATH).
+        assertEquals(new File(filesDirectory, "home").getAbsolutePath(), inherited.get("HOME"));
         assertEquals(new File(filesDirectory, "usr").getAbsolutePath(), inherited.get("PREFIX"));
         assertTrue(inherited.get("PATH").startsWith(
             new File(filesDirectory, "usr/bin").getAbsolutePath()));

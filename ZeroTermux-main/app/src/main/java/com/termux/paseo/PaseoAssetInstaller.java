@@ -10,6 +10,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 
 public final class PaseoAssetInstaller {
     interface AssetSource {
@@ -19,6 +20,7 @@ public final class PaseoAssetInstaller {
 
     private static final int BUFFER_SIZE = 16 * 1024;
     private static final String VERSION_FILE = "runtime-version";
+    private static final String ASSET_FINGERPRINT = "asset-fingerprint";
     private static final String PACKAGE_MANIFEST = "packages/manifest.txt";
 
     public void install(AssetManager assets, String assetRoot, File destination) throws IOException {
@@ -37,9 +39,19 @@ public final class PaseoAssetInstaller {
 
         String bundledVersion = readText(source.open(assetRoot + "/" + VERSION_FILE));
         File installedVersionFile = new File(destination, VERSION_FILE);
+        String bundledFingerprint = readOptionalText(source, assetRoot + "/" + ASSET_FINGERPRINT);
+        File installedFingerprintFile = new File(destination, ASSET_FINGERPRINT);
         if (destination.isDirectory() && installedVersionFile.isFile() &&
-            bundledVersion.equals(readText(installedVersionFile)) &&
-            installedPayloadMatches(source, assetRoot, destination)) {
+            bundledVersion.equals(readText(installedVersionFile)) && bundledFingerprint != null &&
+            installedFingerprintFile.isFile() &&
+            bundledFingerprint.equals(readText(installedFingerprintFile))) {
+            deleteRecursively(backup);
+            return;
+        }
+        if (destination.isDirectory() && installedVersionFile.isFile() &&
+            bundledVersion.equals(readText(installedVersionFile)) && bundledFingerprint == null &&
+            installedPayloadMatches(source, assetRoot, destination) &&
+            installedEnhancedPayloadMatches(source, assetRoot, destination)) {
             deleteRecursively(backup);
             return;
         }
@@ -111,6 +123,54 @@ public final class PaseoAssetInstaller {
         }
     }
 
+    private static boolean installedEnhancedPayloadMatches(
+        AssetSource source, String assetRoot, File destination) {
+        String assetPath = assetRoot + "/enhanced";
+        File installedPath = new File(destination, "enhanced");
+        try {
+            String[] children = source.list(assetPath);
+            if (children == null || children.length == 0) return !installedPath.exists();
+            validateAssetTree(source, assetPath, installedPath);
+            return true;
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    private static void validateAssetTree(
+        AssetSource source, String assetPath, File installedPath) throws IOException {
+        String[] expectedChildren = source.list(assetPath);
+        if (expectedChildren != null && expectedChildren.length > 0) {
+            if (!installedPath.isDirectory()) {
+                throw new IOException("Installed enhanced asset directory is missing: " + installedPath);
+            }
+            String[] installedChildren = installedPath.list();
+            if (installedChildren == null) {
+                throw new IOException("Unable to list installed enhanced assets: " + installedPath);
+            }
+            Arrays.sort(expectedChildren);
+            Arrays.sort(installedChildren);
+            if (!Arrays.equals(expectedChildren, installedChildren)) {
+                throw new IOException("Installed enhanced asset tree is out of date: " + installedPath);
+            }
+            for (String child : expectedChildren) {
+                validateAssetTree(
+                    source, assetPath + "/" + child, new File(installedPath, child));
+            }
+            return;
+        }
+
+        if (!installedPath.isFile()) {
+            throw new IOException("Installed enhanced asset is missing: " + installedPath);
+        }
+        try (InputStream sourceInput = source.open(assetPath);
+             InputStream installedInput = new FileInputStream(installedPath)) {
+            if (!sha256(sourceInput).equals(sha256(installedInput))) {
+                throw new IOException("Installed enhanced asset is out of date: " + installedPath);
+            }
+        }
+    }
+
     private static void validateInstalledPayload(
         AssetSource source, String assetRoot, File destination) throws IOException {
         String bundledManifest = readText(source.open(assetRoot + "/" + PACKAGE_MANIFEST));
@@ -141,6 +201,12 @@ public final class PaseoAssetInstaller {
     }
 
     private static String sha256(File file) throws IOException {
+        try (InputStream input = new FileInputStream(file)) {
+            return sha256(input);
+        }
+    }
+
+    private static String sha256(InputStream input) throws IOException {
         final MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -148,11 +214,9 @@ public final class PaseoAssetInstaller {
             throw new IOException("SHA-256 is unavailable", error);
         }
 
-        try (InputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[BUFFER_SIZE];
-            int read;
-            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
-        }
+        byte[] buffer = new byte[BUFFER_SIZE];
+        int read;
+        while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
 
         StringBuilder hex = new StringBuilder(64);
         for (byte value : digest.digest()) {
@@ -170,13 +234,25 @@ public final class PaseoAssetInstaller {
     }
 
     private static void deleteRecursively(File file) throws IOException {
-        if (!file.exists()) return;
-        if (file.isDirectory()) {
+        boolean symbolicLink = isSymbolicLink(file);
+        if (!file.exists() && !symbolicLink) {
+            file.delete();
+            return;
+        }
+        if (file.isDirectory() && !symbolicLink) {
             File[] children = file.listFiles();
             if (children == null) throw new IOException("Unable to list " + file);
             for (File child : children) deleteRecursively(child);
         }
         if (!file.delete()) throw new IOException("Unable to delete " + file);
+    }
+
+    private static boolean isSymbolicLink(File file) throws IOException {
+        File parent = file.getParentFile();
+        File absolute = parent == null
+            ? file.getAbsoluteFile()
+            : new File(parent.getCanonicalFile(), file.getName()).getAbsoluteFile();
+        return !absolute.getCanonicalFile().equals(absolute);
     }
 
     private static String readText(InputStream input) throws IOException {
@@ -193,6 +269,14 @@ public final class PaseoAssetInstaller {
 
     private static String readText(File file) throws IOException {
         return readText(new FileInputStream(file));
+    }
+
+    private static String readOptionalText(AssetSource source, String path) {
+        try {
+            return readText(source.open(path));
+        } catch (IOException error) {
+            return null;
+        }
     }
 
     private static final class AssetManagerSource implements AssetSource {

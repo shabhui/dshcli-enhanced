@@ -7,7 +7,8 @@ final class PaseoProcessEnvironment {
     private PaseoProcessEnvironment() {}
 
     static void apply(Map<String, String> environment, File filesDirectory) {
-        File home = new File(filesDirectory, "paseo-home");
+        // Unified with the Termux session HOME; see PaseoHome.
+        File home = PaseoHome.directory(filesDirectory);
         File prefix = new File(filesDirectory, "usr");
         File temporary = new File(prefix, "tmp");
 

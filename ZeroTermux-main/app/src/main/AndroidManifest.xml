@@ -213,10 +213,15 @@
             android:name="notch.config"
             android:value="portrait|landscape" />
        <!-- ZeroTermux add {@-->
+        <!-- singleTask keeps exactly one PaseoActivity alive. Without it the activity
+             defaults to "standard" and every explicit launch (launcher shortcut, an am
+             start, a re-entry while the daemon is still booting) stacks another instance,
+             each with its own WebView and its own port dialog, all racing the same daemon. -->
         <activity
             android:name=".paseo.PaseoActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Paseo"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>

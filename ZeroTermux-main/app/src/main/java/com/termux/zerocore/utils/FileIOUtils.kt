@@ -475,12 +475,35 @@ object FileIOUtils {
         if (!webConfigDir.exists()) {
             webConfigDir.mkdirs()
         }
+        // getDataMessagePathFile() calls this on every read, so the symlinks almost always
+        // exist already. Os.symlink would then throw EEXIST, spam a stack trace, and abort
+        // before reaching the second link. Link them idempotently and independently instead.
+        ensureSymlink(webConfigDir.absolutePath, fileHtmlPATH)
+        ensureSymlink(xinhaoRoot.absolutePath, fileXinHaoPATH)
+    }
+
+    /**
+     * Points [link] at [target], tolerating a link that is already correct and replacing one
+     * that points somewhere else or dangles. Never throws.
+     */
+    private fun ensureSymlink(target: String, link: File) {
         try {
-            Os.symlink(webConfigDir.absolutePath, fileHtmlPATH.absolutePath)
-            Os.symlink(xinhaoRoot.absolutePath, fileXinHaoPATH.absolutePath)
+            val existing = runCatching { Os.readlink(link.absolutePath) }.getOrNull()
+            if (existing == target) return
+            if (existing != null) {
+                // Wrong or stale link: drop it so the new one can be created.
+                if (!link.delete()) {
+                    LogUtils.i(TAG, "ensureSymlink could not replace ${link.absolutePath}")
+                    return
+                }
+            } else if (link.exists()) {
+                // A real file or directory occupies the path; leave the user's data alone.
+                LogUtils.i(TAG, "ensureSymlink skipped, ${link.absolutePath} is not a symlink")
+                return
+            }
+            Os.symlink(target, link.absolutePath)
         } catch (e: Exception) {
-            LogUtils.i(TAG, "createWebConfig is error: $e")
-            e.printStackTrace()
+            LogUtils.i(TAG, "ensureSymlink ${link.absolutePath} -> $target failed: $e")
         }
     }
 

@@ -3,6 +3,8 @@ package com.termux.paseo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeNoException;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -10,6 +12,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -91,6 +96,81 @@ public class PaseoAssetInstallerTest {
         installer.install(source, "runtime", destination);
 
         assertEquals(payload, read(new File(destination, "packages/runtime.tgz")));
+    }
+
+    @Test
+    public void sameRuntimeVersionRefreshesChangedEnhancedSources() throws Exception {
+        File destination = new File(temporaryFolder.getRoot(), "runtime");
+        PaseoAssetInstaller installer = new PaseoAssetInstaller();
+        FakeAssetSource source = new FakeAssetSource()
+            .file("runtime/runtime-version", "1")
+            .file("runtime/asset-fingerprint", "fingerprint-one")
+            .file("runtime/packages/manifest.txt", "")
+            .file("runtime/enhanced/install.mjs", "first");
+
+        installer.install(source, "runtime", destination);
+        source.file("runtime/enhanced/install.mjs", "updated");
+        source.file("runtime/asset-fingerprint", "fingerprint-two");
+        installer.install(source, "runtime", destination);
+
+        assertEquals("updated", read(new File(destination, "enhanced/install.mjs")));
+    }
+
+    @Test
+    public void matchingAssetFingerprintSkipsOpeningLargeRuntimePayloads() throws Exception {
+        File destination = new File(temporaryFolder.getRoot(), "runtime");
+        PaseoAssetInstaller installer = new PaseoAssetInstaller();
+        String payload = "large runtime payload";
+        String manifest = sha256(payload) + "  runtime.tgz";
+        FakeAssetSource source = new FakeAssetSource()
+            .file("runtime/runtime-version", "1")
+            .file("runtime/asset-fingerprint", "bundle-fingerprint")
+            .file("runtime/packages/manifest.txt", manifest)
+            .file("runtime/packages/runtime.tgz", payload)
+            .file("runtime/enhanced/install.mjs", "enhanced");
+
+        installer.install(source, "runtime", destination);
+        source.failOnOpen("runtime/packages/runtime.tgz");
+
+        installer.install(source, "runtime", destination);
+        assertEquals("bundle-fingerprint", read(new File(destination, "asset-fingerprint")));
+    }
+
+    @Test
+    public void recursiveCleanupDoesNotFollowDirectorySymlinks() throws Exception {
+        File parent = temporaryFolder.newFolder("symlink-parent");
+        File outside = temporaryFolder.newFolder("outside-runtime");
+        File sentinel = new File(outside, "keep.txt");
+        Files.write(sentinel.toPath(), "keep".getBytes(StandardCharsets.UTF_8));
+        Path link = new File(parent, "staging-link").toPath();
+        try {
+            Files.createSymbolicLink(link, outside.toPath());
+        } catch (IOException | UnsupportedOperationException error) {
+            assumeNoException("symbolic links are unavailable in this test environment", error);
+            return;
+        }
+
+        Method cleanup = PaseoAssetInstaller.class.getDeclaredMethod("deleteRecursively", File.class);
+        cleanup.setAccessible(true);
+        try {
+            cleanup.invoke(null, link.toFile());
+        } catch (InvocationTargetException error) {
+            throw (Exception) error.getCause();
+        }
+
+        assertTrue("outside runtime data must survive cleanup", sentinel.isFile());
+        assertTrue("the link itself should be removed", Files.notExists(link));
+    }
+
+    @Test
+    public void assetInstallerUsesAndroidApi24CompatibleFileOperations() throws Exception {
+        File sourceFile = new File("src/main/java/com/termux/paseo/PaseoAssetInstaller.java");
+        String source = new String(
+            Files.readAllBytes(sourceFile.toPath()), StandardCharsets.UTF_8);
+
+        assertFalse("main installer must not load java.nio.file on Android API 24",
+            source.contains("java.nio.file"));
+        assertFalse("main installer must use File operations for cleanup", source.contains("Files."));
     }
 
     private static String read(File file) throws IOException {

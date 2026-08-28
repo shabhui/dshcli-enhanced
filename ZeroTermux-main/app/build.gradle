@@ -156,8 +156,8 @@ android {
         // ZeroTermux modify {@
         // versionCode 118
         // versionName "0.118.0"
-        versionCode 120
-        versionName "2.3.3"
+        versionCode 123
+        versionName "2.3.6"
         // @}
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -278,11 +278,11 @@ android {
             if (variant.buildType.name == "debug") {
                 def abi = output.getFilter(com.android.build.OutputFile.ABI)
                 //outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
-                outputFileName = new File("ZeroTermux-" + (versionName + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("Paseo-" + (versionName + "-" + "debug") + "_" + (abi ? abi : "universal") + ".apk")
             } else if (variant.buildType.name == "release") {
                 def abi = output.getFilter(com.android.build.OutputFile.ABI)
                 //outputFileName = new File("termux-app_" + (apkVersionTag ? apkVersionTag : project.ext.packageVariant + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
-                outputFileName = new File("ZeroTermux-" + (versionName + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
+                outputFileName = new File("Paseo-" + (versionName + "-" + "release") + "_" + (abi ? abi : "universal") + ".apk")
             }
         }
     }
@@ -298,6 +298,39 @@ def stagePaseoEnhancedAssets = tasks.register("stagePaseoEnhancedAssets", Sync) 
     from(rootProject.projectDir.parentFile) {
         include "install.mjs", "uninstall.mjs", "package.json"
         include "patches/**", "scripts/**", "web/**"
+    }
+    def runtimeAssetRoot = file("src/main/assets/paseo-runtime")
+    def fingerprintInputs = [
+        new File(runtimeAssetRoot, "runtime-version"),
+        new File(runtimeAssetRoot, "install-bundled-runtime.sh"),
+        new File(runtimeAssetRoot, "start-paseo.sh"),
+        new File(runtimeAssetRoot, "packages/manifest.txt")
+    ]
+    inputs.files(fingerprintInputs)
+    outputs.file(new File(paseoAssetsDir, "paseo-runtime/asset-fingerprint"))
+    doLast {
+        def digest = java.security.MessageDigest.getInstance("SHA-256")
+        def addFingerprintFile = { File root, File entry ->
+            def relative = root.toPath().relativize(entry.toPath()).toString().replace('\\', '/')
+            digest.update(relative.getBytes("UTF-8"))
+            digest.update((byte) 0)
+            entry.withInputStream { input ->
+                byte[] buffer = new byte[16384]
+                int count
+                while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count)
+            }
+            digest.update((byte) 0)
+        }
+        fingerprintInputs.each { addFingerprintFile(runtimeAssetRoot, it) }
+        def enhancedRoot = new File(paseoAssetsDir, "paseo-runtime/enhanced")
+        fileTree(enhancedRoot).matching { include "**/*" }.files
+            .findAll { it.isFile() }
+            .sort { left, right -> left.path <=> right.path }
+            .each { addFingerprintFile(enhancedRoot, it) }
+        def hex = digest.digest().collect { String.format("%02x", it & 0xff) }.join()
+        def output = new File(paseoAssetsDir, "paseo-runtime/asset-fingerprint")
+        output.parentFile.mkdirs()
+        output.setText(hex + "\n", "UTF-8")
     }
 }
 
@@ -337,6 +370,7 @@ dependencies {
     implementation "androidx.biometric:biometric-ktx:1.2.0-alpha05"
     // @}
 }
+
 
 task versionName {
     doLast {

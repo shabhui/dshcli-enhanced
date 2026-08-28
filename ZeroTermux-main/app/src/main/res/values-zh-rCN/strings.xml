@@ -2004,5 +2004,19 @@
     <string name="zt_crash_history_not_found">记录不存在或已被删除</string>
     <string name="zt_crash_history_thread">线程: %1$s · 版本: %2$s</string>
     <string name="zt_crash_history_detail_meta">时间: %1$s\n线程: %2$s\n版本: %3$s\n异常: %4$s\n消息: %5$s</string>
+    <string name="paseo_no_browser">没有可用的浏览器来打开此链接。</string>
+    <string name="paseo_port_title">Paseo 端口</string>
+    <string name="paseo_port_message">请选择本地服务和网页端口。端口 6768 已被内部 Codex 代理占用。</string>
+    <string name="paseo_port_confirm">启动</string>
+    <string name="paseo_port_exit">退出</string>
+    <string name="paseo_port_error">请输入 1024 至 65535 之间的端口，不能使用 6768。</string>
+    <string name="paseo_action_retry">重试</string>
+    <string name="paseo_action_open_terminal">打开终端</string>
+    <string name="paseo_status_preparing_terminal">正在准备内置终端</string>
+    <string name="paseo_status_preparing_runtime">正在准备内置 Paseo 运行环境</string>
+    <string name="paseo_status_installing_runtime">正在安装内置 Paseo 运行环境</string>
+    <string name="paseo_status_waiting_runtime">正在等待内置 Paseo 运行环境</string>
+    <string name="paseo_status_waiting_embedded_runtime">正在等待内置运行环境</string>
+    <string name="paseo_status_daemon_stopped">Paseo 服务意外停止</string>
 
 </resources>

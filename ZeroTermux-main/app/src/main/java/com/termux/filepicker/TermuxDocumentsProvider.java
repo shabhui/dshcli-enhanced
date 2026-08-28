@@ -65,7 +65,7 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
     @Override
     public Cursor queryRoots(String[] projection) {
         final MatrixCursor result = new MatrixCursor(projection != null ? projection : DEFAULT_ROOT_PROJECTION);
-        final String applicationName = getContext().getString(R.string.application_name);
+        final String applicationName = getContext().getString(R.string.app_name);
 
         final MatrixCursor.RowBuilder row = result.newRow();
         row.add(Root.COLUMN_ROOT_ID, getDocIdForFile(BASE_DIR));
@@ -112,7 +112,8 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
 
     @Override
     public boolean onCreate() {
-        return true;
+        if (!BASE_DIR.exists() && !BASE_DIR.mkdirs()) return false;
+        return BASE_DIR.isDirectory();
     }
 
     @Override

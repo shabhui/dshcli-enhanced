@@ -114,9 +114,11 @@ public final class TermuxInstaller {
         if (FileUtils.directoryFileExists(TERMUX_PREFIX_DIR_PATH, true)) {
             if (TermuxFileUtils.isTermuxPrefixDirectoryEmpty()) {
                 Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" exists but is empty or only contains specific unimportant files.");
-            } else {
+            } else if (hasUsableTerminalPrefix(TERMUX_PREFIX_DIR)) {
                 whenDone.run();
                 return;
+            } else {
+                Logger.logInfo(LOG_TAG, "The termux prefix directory contains an embedded runtime but no usable terminal shell; reinstalling the bundled bootstrap.");
             }
         } else if (FileUtils.fileExists(TERMUX_PREFIX_DIR_PATH, false)) {
             Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" does not exist but another file exists at its destination.");
@@ -255,6 +257,13 @@ public final class TermuxInstaller {
                 }
             }
         }.start();
+    }
+
+    static boolean hasUsableTerminalPrefix(File prefixDirectory) {
+        File binDirectory = new File(prefixDirectory, "bin");
+        return new File(binDirectory, "bash").isFile()
+            && new File(binDirectory, "ls").isFile()
+            && new File(binDirectory, "env").isFile();
     }
 
     public static void showBootstrapErrorDialog(Activity activity, Runnable whenDone, String message) {

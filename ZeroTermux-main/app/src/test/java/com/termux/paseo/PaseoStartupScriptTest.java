@@ -32,9 +32,13 @@ public class PaseoStartupScriptTest {
         assertTrue(runtimePreparation.contains("--os=android --cpu=arm64"));
         assertTrue(runtimePreparation.contains("prebuilds\\android-arm64"));
         assertTrue(installer.contains("termux-node-runtime-arm64.tgz"));
-        assertTrue(installer.contains("tar -xzf"));
+        assertTrue(installer.contains("gzip -dc"));
+        assertTrue(installer.contains("tar -xf -"));
+        assertFalse(installer.contains("tar -xzf"));
         assertFalse(installer.contains("dpkg -i"));
         assertTrue(installer.contains("paseo-node-modules-arm64.tgz"));
+        assertFalse(installer.contains("LD_LIBRARY_PATH"));
+        assertFalse(script.contains("LD_LIBRARY_PATH"));
         assertFalse(installer.contains("paseo-node-modules-arm64.tar.gz"));
         assertFalse(installer.contains("pkg update"));
         assertFalse(installer.contains("npm install"));
@@ -42,13 +46,19 @@ public class PaseoStartupScriptTest {
         assertTrue(runtimePreparation.contains("com.paseoe"));
         assertTrue(script.contains("\"$NODE\" \"$DAEMON_WORKER\" --no-relay --web-ui &"));
         assertTrue(script.contains("\"$NODE\" \"$RUNTIME_DIR/enhanced/install.mjs\""));
-        assertTrue(script.contains("ENHANCED_VERSION=\"2.3.3\""));
+        assertTrue(script.contains("BUNDLED_FINGERPRINT_FILE=\"$RUNTIME_DIR/asset-fingerprint\""));
+        assertTrue(script.contains("ENHANCED_FINGERPRINT="));
+        assertFalse(script.contains("ENHANCED_VERSION="));
+        assertTrue(script.contains("PASEO_STANDALONE_ANDROID=1"));
+        assertFalse(script.contains("PASEO_STANDALONE_WORKSPACE"));
+        assertFalse(script.contains("workspaces/default"));
         assertTrue(script.contains("install-bundled-runtime.sh"));
         assertTrue(script.contains("wait_for_paseo"));
-        assertTrue(script.contains("\"$TOYBOX\" nc -z -w 1 127.0.0.1 6767"));
+        assertTrue(script.contains("\"$TOYBOX\" nc -z -w 1 127.0.0.1 \"$PORT\""));
         assertTrue(script.contains("RUN_ID=\"${1:?Missing Paseo run id}\""));
         assertTrue(script.contains("STATUS_FILE=\"$APP_DIR/status-$RUN_ID\""));
-        assertTrue(script.contains("printf '%s\\n%s\\n%s\\n' \"$RUN_ID\" \"$1\" \"$2\""));
+        assertTrue(script.contains(
+            "\"$TOYBOX\" printf '%s\\n%s\\n%s\\n' \"$RUN_ID\" \"$1\" \"$2\""));
     }
 
     @Test
@@ -58,9 +68,19 @@ public class PaseoStartupScriptTest {
             Files.readAllBytes(scriptFile.toPath()), StandardCharsets.UTF_8);
 
         assertTrue(script.contains("is_paseo_ready()"));
-        assertTrue(script.contains("if ! is_paseo_ready; then"));
+        assertTrue(script.contains("if is_paseo_ready; then"));
         assertFalse(script.contains("\"$NODE\" -e"));
         assertFalse(script.contains("daemon status"));
+    }
+
+    @Test
+    public void standaloneStartupDoesNotAutoDownloadOptionalSpeechModels() throws Exception {
+        File scriptFile = new File("src/main/assets/paseo-runtime/start-paseo.sh");
+        String script = new String(
+            Files.readAllBytes(scriptFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(script.contains("PASEO_VOICE_MODE_ENABLED=false"));
+        assertTrue(script.contains("PASEO_DICTATION_ENABLED=false"));
     }
 
     @Test
@@ -71,13 +91,42 @@ public class PaseoStartupScriptTest {
 
         assertTrue(script.contains(
             "DAEMON_WORKER=\"$PREFIX/lib/node_modules/@getpaseo/server/dist/server/server/daemon-worker.js\""));
-        assertTrue(script.contains("PASEO_LISTEN=127.0.0.1:6767"));
+        assertTrue(script.contains("PASEO_LISTEN=127.0.0.1:$PORT"));
         assertTrue(script.contains("PASEO_WEB_UI_ENABLED=true"));
         assertTrue(script.contains("DAEMON_PID=$!"));
         assertTrue(script.contains("trap stop_daemon EXIT INT TERM"));
         assertTrue(script.contains("wait \"$DAEMON_PID\""));
-        assertTrue(script.contains("while [ \"$attempt\" -lt 1200 ]"));
+        assertTrue(script.contains("while [ \"$attempt\" -lt 180 ]"));
+        assertFalse(script.contains("while [ \"$attempt\" -lt 1200 ]"));
         assertFalse(script.contains("daemon start"));
+    }
+
+    @Test
+    public void startupCapturesTimestampedDiagnosticsForEveryBoundary() throws Exception {
+        File scriptFile = new File("src/main/assets/paseo-runtime/start-paseo.sh");
+        String script = new String(
+            Files.readAllBytes(scriptFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(script.contains("STARTUP_LOG=\"$APP_DIR/paseo-startup.log\""));
+        assertTrue(script.contains("date '+%Y-%m-%dT%H:%M:%S%z'"));
+        assertTrue(script.contains("node --version"));
+        assertTrue(script.contains("install-bundled-runtime.sh"));
+        assertTrue(script.contains("daemon-worker.js"));
+        // The startup surface is localised, so pin the boundary this diagnoses (90s) rather than
+        // English prose. Losing the message entirely would still fail here.
+        assertTrue(script.contains("fail \"Paseo 启动超时（已等待 90 秒）\""));
+    }
+
+    @Test
+    public void startupDoesNotReuseAnUnknownProcessAlreadyBoundToThePaseoPort() throws Exception {
+        File scriptFile = new File("src/main/assets/paseo-runtime/start-paseo.sh");
+        String script = new String(
+            Files.readAllBytes(scriptFile.toPath()), StandardCharsets.UTF_8);
+
+        // Localised, but still asserts the port is named and that this path fails instead of
+        // reusing whatever already holds the port.
+        assertTrue(script.contains("fail \"Paseo 端口 $PORT 已被占用\""));
+        assertFalse(script.contains("if ! is_paseo_ready; then"));
     }
 
     @Test
@@ -122,7 +171,8 @@ public class PaseoStartupScriptTest {
         String installer = new String(
             Files.readAllBytes(installerFile.toPath()), StandardCharsets.UTF_8);
 
-        assertTrue(installer.contains("relative=\"$(printf '%s' \"$relative\" | \"$TOYBOX\" tr -d '\\r')\""));
+        assertTrue(installer.contains(
+            "relative=\"$(\"$TOYBOX\" printf '%s' \"$relative\" | \"$TOYBOX\" tr -d '\\r')\""));
     }
 
     @Test
@@ -139,7 +189,9 @@ public class PaseoStartupScriptTest {
 
         assertTrue(installer.startsWith("#!/system/bin/sh\n"));
         assertTrue(startup.startsWith("#!/system/bin/sh\n"));
-        assertTrue(installer.contains("\"$TOYBOX\" tar -xzf"));
+        assertTrue(installer.contains("\"$TOYBOX\" gzip -dc"));
+        assertTrue(installer.contains("\"$TOYBOX\" tar -xf -"));
+        assertFalse(installer.contains("\"$TOYBOX\" tar -xzf"));
         assertFalse(installer.contains("$'\\r'"));
         assertFalse(installer.contains("$(<"));
         assertFalse(startup.contains("$(<"));
@@ -178,8 +230,7 @@ public class PaseoStartupScriptTest {
         assertFalse(startup.contains("\"$PASEO\" --version"));
         assertTrue(installer.contains(
             "require('$PREFIX/lib/node_modules/@getpaseo/cli/package.json').version"));
-        assertTrue(startup.contains(
-            "require('$PREFIX/lib/node_modules/@getpaseo/cli/package.json').version"));
+        assertTrue(startup.contains("\"$RUNTIME_DIR/install-bundled-runtime.sh\""));
     }
 
     @Test
@@ -234,7 +285,7 @@ public class PaseoStartupScriptTest {
 
         assertTrue(installer.contains("TOYBOX=\"/system/bin/toybox\""));
         assertTrue(installer.contains("\"$TOYBOX\" sha256sum \"$payload\""));
-        assertTrue(installer.contains("\"$TOYBOX\" mkdir -p \"$PREFIX/lib/node_modules\""));
+        assertTrue(installer.contains("\"$TOYBOX\" mkdir -p \"$STAGED_PREFIX/lib/node_modules\""));
         assertTrue(installer.contains("\"$TOYBOX\" chmod 755"));
         assertTrue(installer.contains("\"$TOYBOX\" rm -f \"$PREFIX/bin/paseo\""));
         assertFalse(installer.contains("| cut"));
@@ -247,6 +298,23 @@ public class PaseoStartupScriptTest {
     }
 
     @Test
+    public void startupScriptsNeverResolvePrintfThroughTheMutableTermuxPrefix() throws Exception {
+        File installerFile = new File("src/main/assets/paseo-runtime/install-bundled-runtime.sh");
+        File startupFile = new File("src/main/assets/paseo-runtime/start-paseo.sh");
+        String installer = new String(
+            Files.readAllBytes(installerFile.toPath()), StandardCharsets.UTF_8);
+        String startup = new String(
+            Files.readAllBytes(startupFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(installer.contains("\"$TOYBOX\" printf '%s' \"$relative\""));
+        assertTrue(installer.contains("\"$TOYBOX\" printf '%s\\n'"));
+        assertTrue(startup.contains("\"$TOYBOX\" printf '%s\\n%s\\n%s\\n'"));
+        assertTrue(startup.contains("\"$TOYBOX\" printf '%s\\n' \"$ENHANCED_FINGERPRINT\""));
+        assertFalse(installer.matches("(?s).*\\n\\s*printf .*"));
+        assertFalse(startup.matches("(?s).*\\n\\s*printf .*"));
+    }
+
+    @Test
     public void runtimeVersionForcesRepairAfterEnhancedInstallerUpdate() throws Exception {
         File installerFile = new File("src/main/assets/paseo-runtime/install-bundled-runtime.sh");
         File runtimeVersionFile = new File("src/main/assets/paseo-runtime/runtime-version");
@@ -255,7 +323,45 @@ public class PaseoStartupScriptTest {
         String runtimeVersion = new String(
             Files.readAllBytes(runtimeVersionFile.toPath()), StandardCharsets.UTF_8);
 
-        assertTrue(installer.contains("RUNTIME_VERSION=\"paseo-0.3.1-arm64-v6\""));
-        assertTrue(runtimeVersion.contains("runtime-6"));
+        assertTrue(installer.contains("RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-arm64-v8\""));
+        assertTrue(runtimeVersion.contains("runtime-15"));
+        assertTrue(installer.contains("[ -f \"$RUNTIME_OWNERSHIP\" ]"));
+    }
+
+    @Test
+    public void enhancedInstallerReappliesWheneverBundledSourceContentChanges() throws Exception {
+        File startupFile = new File("src/main/assets/paseo-runtime/start-paseo.sh");
+        String startup = new String(
+            Files.readAllBytes(startupFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(startup.contains("ENHANCED_MARKER=\"$APP_DIR/enhanced-fingerprint\""));
+        assertTrue(startup.contains("BUNDLED_FINGERPRINT_FILE=\"$RUNTIME_DIR/asset-fingerprint\""));
+        assertTrue(startup.contains("[ \"$INSTALLED_ENHANCED_FINGERPRINT\" != \"$ENHANCED_FINGERPRINT\" ]"));
+        assertTrue(startup.contains(
+            "\"$TOYBOX\" printf '%s\\n' \"$ENHANCED_FINGERPRINT\" > \"$ENHANCED_MARKER.tmp\""));
+        assertTrue(startup.contains("\"$TOYBOX\" mv \"$ENHANCED_MARKER.tmp\" \"$ENHANCED_MARKER\""));
+    }
+
+    @Test
+    public void standaloneRuntimeBundlesAndVerifiesTheOfficialCodexCli() throws Exception {
+        File installerFile = new File("src/main/assets/paseo-runtime/install-bundled-runtime.sh");
+        File runtimePackageFile = new File("../../scripts/android-runtime/package.json");
+        File runtimePreparationFile = new File("../../scripts/prepare-android-runtime.ps1");
+        String installer = new String(
+            Files.readAllBytes(installerFile.toPath()), StandardCharsets.UTF_8);
+        String runtimePackage = new String(
+            Files.readAllBytes(runtimePackageFile.toPath()), StandardCharsets.UTF_8);
+        String runtimePreparation = new String(
+            Files.readAllBytes(runtimePreparationFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(runtimePackage.contains("\"@openai/codex\": \"0.147.0\""));
+        assertTrue(runtimePreparation.contains("node_modules/@openai/codex-linux-arm64"));
+        assertTrue(runtimePreparation.contains("llvm-readelf.exe"));
+        assertTrue(runtimePreparation.contains("Codex Android binary must be statically linked"));
+        assertTrue(installer.contains("$PREFIX/lib/node_modules/@openai/codex/bin/codex.js"));
+        assertTrue(installer.contains("STAGED_CODEX_VENDOR=\"$STAGED_PREFIX/lib/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl\""));
+        assertTrue(installer.contains("\"$TOYBOX\" chmod 755 \"$STAGED_CODEX_VENDOR/bin/codex\""));
+        assertTrue(installer.contains("CODEX_VERSION=\"$(\"$PREFIX/bin/codex\" --version)\""));
+        assertTrue(installer.contains("codex-cli 0.147.0"));
     }
 }
