@@ -145,6 +145,124 @@ function patchAcpAgentSystemPrompt(target) {
   writeFileSync(target, patched);
 }
 
+function patchPiResumeSessionFile(target) {
+  const source = readFileSync(target, "utf8");
+  const helperStart = "function resolvePaseoPiResumeSessionFile(";
+  const callMarker = "const sessionFile = resolvePaseoPiResumeSessionFile(handle.nativeHandle, this.runtimeSettings);";
+  if (source.includes(helperStart) && source.includes(callMarker)) return;
+  const helper = [
+    "function resolvePaseoPiResumeSessionFile(nativeHandle, runtimeSettings) {",
+    "  if (!nativeHandle) {",
+    "    throw new Error(\"Pi resume requires a native session file handle\");",
+    "  }",
+    "  if (existsSync(nativeHandle)) return nativeHandle;",
+    "  // A $HOME move leaves the recorded absolute path dangling while the session file itself was",
+    "  // carried across, so look under the agent directory this launch actually uses before failing.",
+    "  const rerooted = join(resolvePiAgentDir(runtimeSettings?.env), \"sessions\", nativeHandle.split(/[\\\\/]+/u).pop() ?? \"\");",
+    "  if (rerooted !== nativeHandle && existsSync(rerooted)) return rerooted;",
+    "  throw new Error(`Pi session file is missing: ${nativeHandle}`);",
+    "}",
+    "",
+  ].join("\n");
+  const anchor = "function resolvePiAgentDir(env) {";
+  if (!source.includes(anchor)) {
+    throw new Error(`Unable to patch Pi resume: agent directory resolver missing in ${target}`);
+  }
+  const originalCall = [
+    "        const sessionFile = handle.nativeHandle;",
+    "        if (!sessionFile) {",
+    "            throw new Error(\"Pi resume requires a native session file handle\");",
+    "        }",
+  ].join("\n");
+  const callMatches = source.split(originalCall).length - 1;
+  if (callMatches !== 1) {
+    throw new Error(`Unable to patch Pi resume: matched ${callMatches} resume guards in ${target}`);
+  }
+  const withHelper = source.includes(helperStart) ? source : source.replace(anchor, `${helper}${anchor}`);
+  writeFileSync(target, withHelper.replace(originalCall, `        ${callMarker}`));
+}
+
+function patchClaudeMaxTokensNotice(target) {
+  let source = readFileSync(target, "utf8");
+  const helperStart = "function describePaseoClaudeTruncation(";
+  const callMarker = "const truncationNotice = describePaseoClaudeTruncation(event);";
+  const emptyMarker = "const paseoEmptyTurnNotice =";
+  const alreadyTruncation = source.includes(helperStart) && source.includes(callMarker);
+  const alreadyEmpty = source.includes(emptyMarker);
+  if (alreadyTruncation && alreadyEmpty) return;
+  const helper = [
+    "function describePaseoClaudeTruncation(event) {",
+    "  const delta = toObjectRecord(event.delta);",
+    "  if (readTrimmedString(delta?.stop_reason) !== \"max_tokens\") return null;",
+    "  // max_tokens is a non-error terminal reason, so nothing downstream reports it and the turn",
+    "  // lands as `completed` with a half-written body. Surface it or the truncation stays invisible.",
+    "  const outputTokens = toObjectRecord(event.usage)?.output_tokens;",
+    "  const budget = typeof outputTokens === \"number\" ? `${outputTokens} tokens` : \"the output limit\";",
+    "  return `⚠️ 回复被截断：模型在 ${budget} 处撞到 max_tokens 上限。若思考占满了预算，正文就会缺失或半截。`;",
+    "}",
+    "",
+  ].join("\n");
+  const anchor = "function isSyntheticUserEntry(entry) {";
+  if (!source.includes(anchor)) {
+    throw new Error(`Unable to patch Claude truncation notice: transcript helper missing in ${target}`);
+  }
+  const originalCall = [
+    "        if (eventType === \"content_block_start\") {",
+  ].join("\n");
+  const callMatches = source.split(originalCall).length - 1;
+  if (callMatches !== 1 && !alreadyTruncation) {
+    throw new Error(`Unable to patch Claude truncation notice: matched ${callMatches} stream branches in ${target}`);
+  }
+  const branch = [
+    "        if (eventType === \"message_delta\") {",
+    "            const truncationNotice = describePaseoClaudeTruncation(event);",
+    "            if (!truncationNotice) {",
+    "                return [];",
+    "            }",
+    "            const messageId = this.resolveMessageId({",
+    "                runId,",
+    "                createIfMissing: false,",
+    "                messageId: streamEventMessageId,",
+    "            });",
+    "            return [{ type: \"assistant_message\", text: truncationNotice, messageId: messageId ?? undefined }];",
+    "        }",
+  ].join("\n");
+  if (!alreadyTruncation) {
+    source = source.includes(helperStart) ? source : source.replace(anchor, `${helper}${anchor}`);
+    source = source.replace(originalCall, `${branch}\n${originalCall}`);
+  }
+
+  // Second blind spot: a turn can end `end_turn` having produced no assistant text at all
+  // (thinking streamed, body never arrived, `result` empty). Upstream only rescues the
+  // zero-token case when `result` carries text, so an empty body completes silently.
+  if (!alreadyEmpty) {
+    const emptyAnchor = 'events.push({ type: "turn_completed", provider: "claude", usage });';
+    const emptyMatches = source.split(emptyAnchor).length - 1;
+    if (emptyMatches !== 1) {
+      throw new Error(`Unable to patch Claude empty-turn notice: matched ${emptyMatches} completion sites in ${target}`);
+    }
+    const emptyBranch = [
+      "            const paseoEmptyTurnNotice = resultText.length === 0 && !this.activeTurnHasAssistantText",
+      "                ? \"⚠️ 本轮没有产出任何正文：模型只回了思考（或什么都没回）就结束了。上游把这轮标成成功，所以默认不会有任何提示。\"",
+      "                : null;",
+      "            if (paseoEmptyTurnNotice) {",
+      "                events.push({",
+      "                    type: \"timeline\",",
+      "                    provider: \"claude\",",
+      "                    item: {",
+      "                        type: \"assistant_message\",",
+      "                        text: paseoEmptyTurnNotice,",
+      "                        messageId: message.uuid,",
+      "                    },",
+      "                });",
+      "            }",
+    ].join("\n");
+    source = source.replace(emptyAnchor, `${emptyBranch.trimStart()}\n            ${emptyAnchor}`);
+  }
+
+  writeFileSync(target, source);
+}
+
 const serverRoot = findServerRoot(option("--server-root"));
 const paseoHome = path.resolve(option("--paseo-home") || process.env.PASEO_HOME || path.join(homedir(), ".paseo"));
 const standaloneAndroid = process.env.PASEO_STANDALONE_ANDROID === "1";
@@ -203,6 +321,16 @@ const acpAgentTarget = path.join(serverCodeRoot, "agent", "providers", "acp-agen
 if (existsSync(acpAgentTarget)) {
   backup(acpAgentTarget, path.join("server", "agent", "providers", "acp-agent.js"));
   patchAcpAgentSystemPrompt(acpAgentTarget);
+}
+const piAgentTarget = path.join(serverCodeRoot, "agent", "providers", "pi", "agent.js");
+if (existsSync(piAgentTarget)) {
+  backup(piAgentTarget, path.join("server", "agent", "providers", "pi", "agent.js"));
+  patchPiResumeSessionFile(piAgentTarget);
+}
+const claudeAgentTarget = path.join(serverCodeRoot, "agent", "providers", "claude", "agent.js");
+if (existsSync(claudeAgentTarget)) {
+  backup(claudeAgentTarget, path.join("server", "agent", "providers", "claude", "agent.js"));
+  patchClaudeMaxTokensNotice(claudeAgentTarget);
 }
 
 const configPath = path.join(paseoHome, "config.json");

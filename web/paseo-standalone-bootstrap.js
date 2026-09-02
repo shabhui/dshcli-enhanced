@@ -149,6 +149,12 @@
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
+      if (isAndroidBridgeAvailable()) {
+        // 优先用系统文件管理器(SAF)选目录,选完直接回传真实路径;
+        // bridge 不在(电脑端浏览器打开)才退回自制目录浏览器。
+        pickWorkspaceDirectory();
+        return;
+      }
       openWorkspaceBrowser();
     }, true);
     window.addEventListener("paseo:directory-picked", function (event) {

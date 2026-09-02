@@ -25,6 +25,13 @@ final class PaseoDirectoryChooser {
         intent.addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         if (Build.VERSION.SDK_INT >= 26) {
             intent.putExtra("android.content.extra.SHOW_ADVANCED", true);
+            try {
+                // 让选择器直接落在内部存储根,免得在 SAF 抽屉里先翻存储卷。
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildRootUri(EXTERNAL_STORAGE_AUTHORITY, "primary"));
+            } catch (RuntimeException ignored) {
+                // 个别 ROM 的 DocumentsUI 不认 initial URI;忽略后仍从默认位置打开。
+            }
         }
         return intent;
     }

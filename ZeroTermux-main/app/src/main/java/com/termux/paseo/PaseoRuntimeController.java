@@ -24,6 +24,16 @@ public final class PaseoRuntimeController {
         void onState(PaseoRuntimeState state);
     }
 
+    /**
+     * Replaces the launch step once the runtime assets are on disk.
+     *
+     * <p>Bootstrap and asset install are shared by every backend; only what gets spawned afterwards
+     * differs. Returning false declines and leaves paseo's own daemon path untouched.
+     */
+    public interface RuntimeLauncher {
+        boolean launch(File runtimeDirectory);
+    }
+
     private static final long STATUS_POLL_MS = 500L;
     private static final ExecutorService RUNTIME_INSTALL_EXECUTOR = Executors.newSingleThreadExecutor(command -> {
         Thread thread = new Thread(command, "paseo-runtime-installer");
@@ -37,6 +47,7 @@ public final class PaseoRuntimeController {
         RUNTIME_INSTALL_EXECUTOR, command -> handler.post(command));
     private Activity activity;
     private Listener listener;
+    private RuntimeLauncher launcher;
     private File homeDirectory;
     private Process startupProcess;
     private boolean finished;
@@ -61,6 +72,11 @@ public final class PaseoRuntimeController {
             }
         }
     };
+
+    /** Set before {@link #start}; survives {@link #stop} and {@link #retry}. */
+    public void setRuntimeLauncher(RuntimeLauncher launcher) {
+        this.launcher = launcher;
+    }
 
     public void start(Activity activity, Listener listener) {
         start(activity, listener, PaseoPortConfig.DEFAULT_PORT);
@@ -117,17 +133,28 @@ public final class PaseoRuntimeController {
     private void prepareOverlayRuntime(long generation) {
         if (!isCurrentRun(generation) || activity == null || homeDirectory == null) return;
 
-        AssetManager assets = activity.getApplicationContext().getAssets();
-        File runtimeDirectory = new File(homeDirectory, ".paseo-app/runtime");
+        Activity currentActivity = activity;
+        File filesDirectory = currentActivity.getFilesDir();
+        File currentHome = homeDirectory;
+        AssetManager assets = currentActivity.getApplicationContext().getAssets();
+        File runtimeDirectory = new File(currentHome, ".paseo-app/runtime");
         dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
             text(R.string.paseo_status_installing_runtime, "Installing the embedded Paseo runtime")));
         runtimePreparer.prepare(
             () -> {
-                ensureDirectory(homeDirectory);
-                ensureDirectory(new File(activity.getFilesDir(), "usr/tmp"));
+                ensureDirectory(currentHome);
+                ensureDirectory(new File(filesDirectory, "usr/tmp"));
                 assetInstaller.install(assets, "paseo-runtime", runtimeDirectory);
+                PaseoRuntimePrefixInstaller.install(filesDirectory, runtimeDirectory);
             },
-            () -> startPaseoTask(generation, runtimeDirectory),
+            () -> {
+                if (!isCurrentRun(generation)) return;
+                // Branch point: an installed launcher (EAC) takes over here, reusing everything
+                // above. Declining falls through to paseo's own daemon, unchanged.
+                if (launcher == null || !launcher.launch(runtimeDirectory)) {
+                    startPaseoTask(generation, runtimeDirectory);
+                }
+            },
             error -> {
                 if (isCurrentRun(generation)) {
                     dispatch(new PaseoRuntimeState(PaseoRuntimeState.Phase.ERROR, messageFor(error)));

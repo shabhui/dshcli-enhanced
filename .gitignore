@@ -22,3 +22,8 @@ ZeroTermux-main/*.log
 
 # Local build/inspection artifacts, not source
 /output/
+
+# Upstream reference archive and local session artifacts
+/DSHA-main.zip
+/.claude/
+ZeroTermux-main/.kotlin/

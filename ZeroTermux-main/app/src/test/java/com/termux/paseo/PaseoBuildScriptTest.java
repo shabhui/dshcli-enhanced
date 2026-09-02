@@ -49,12 +49,12 @@ public class PaseoBuildScriptTest {
         }
 
         String relocated = contents.toString();
-        assertTrue(relocated.contains("/data/data/com.paseoe"));
+        assertTrue(relocated.contains("/data/data/com.dshcli"));
         assertFalse(relocated.contains("/data/data/com.termux"));
-        assertTrue(relocated.contains("com.paseoe/com.termux.app.TermuxService"));
+        assertTrue(relocated.contains("com.dshcli/com.termux.app.TermuxService"));
         assertTrue(relocated.contains("com.termux.termuxam.Am"));
-        assertFalse(relocated.contains("com.paseoe/com.paseoe.app.TermuxService"));
-        assertFalse(relocated.contains("com.paseoe.termuxam.Am"));
+        assertFalse(relocated.contains("com.dshcli/com.dshcli.app.TermuxService"));
+        assertFalse(relocated.contains("com.dshcli.termuxam.Am"));
     }
 
     @Test

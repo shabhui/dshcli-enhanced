@@ -5,8 +5,16 @@ APP_DIR="$HOME/.paseo-app"
 MARKER="$APP_DIR/runtime-version"
 RUNTIME_DIR="$APP_DIR/runtime"
 PACKAGES_DIR="$RUNTIME_DIR/packages"
-RUNTIME_VERSION="paseo-0.3.1-codex-0.147.0-arm64-v8"
+RUNTIME_VERSION="paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.1-arm64-v10"
 TOYBOX="/system/bin/toybox"
+EAC_ARCHIVE="$PACKAGES_DIR/eac-runtime-arm64.tgz"
+EAC_ROOT="$RUNTIME_DIR/eac"
+EAC_STAGING_ROOT="$RUNTIME_DIR/eac-payload.staging"
+EAC_STAGED_ROOT="$EAC_STAGING_ROOT/eac"
+EAC_BACKUP="$RUNTIME_DIR/eac.backup"
+EAC_SHA_FILE="$EAC_ROOT/.payload-sha256"
+EAC_SWAP_ACTIVE=false
+EAC_HAD_LIVE=false
 STAGING_ROOT="$APP_DIR/runtime-prefix.staging"
 STAGED_PREFIX="$STAGING_ROOT/prefix"
 BACKUP_PREFIX="$APP_DIR/runtime-prefix.backup"
@@ -26,6 +34,90 @@ esac
 
 path_exists() {
     [ -e "$1" ] || [ -L "$1" ]
+}
+
+validate_eac_root() {
+    root="$1"
+    [ -f "$root/sidecar/server.js" ] &&
+        [ -f "$root/sidecar/bridge.js" ] &&
+        [ -f "$root/sidecar/phone-bridge.js" ] &&
+        [ -f "$root/sidecar/rescue-integration.js" ] &&
+        [ -f "$root/dsh-desktop/package.json" ] &&
+        [ -f "$root/dsh-desktop/lib/desktop/boot-server.js" ]
+}
+
+rollback_eac_swap() (
+    set +e
+    if [ "$EAC_SWAP_ACTIVE" = "true" ]; then
+        "$TOYBOX" rm -rf "$EAC_ROOT"
+        if [ "$EAC_HAD_LIVE" = "true" ] && path_exists "$EAC_BACKUP"; then
+            "$TOYBOX" mv "$EAC_BACKUP" "$EAC_ROOT" || exit 1
+        fi
+    fi
+    "$TOYBOX" rm -rf "$EAC_STAGING_ROOT" || exit 1
+)
+
+rollback_eac_on_signal() {
+    signal_status="$1"
+    trap - EXIT INT TERM
+    rollback_eac_swap || signal_status=$?
+    exit "$signal_status"
+}
+
+recover_eac_swap() {
+    expected_sha="$1"
+    "$TOYBOX" rm -rf "$EAC_STAGING_ROOT" || exit 1
+    path_exists "$EAC_BACKUP" || return 0
+    current_sha="$("$TOYBOX" cat "$EAC_SHA_FILE" 2>/dev/null || true)"
+    if validate_eac_root "$EAC_ROOT" && [ "$current_sha" = "$expected_sha" ]; then
+        "$TOYBOX" rm -rf "$EAC_BACKUP" || exit 1
+        return 0
+    fi
+    "$TOYBOX" rm -rf "$EAC_ROOT" || exit 1
+    "$TOYBOX" mv "$EAC_BACKUP" "$EAC_ROOT" || exit 1
+}
+
+install_eac_payload() {
+    expected_sha="$1"
+    recover_eac_swap "$expected_sha"
+    current_sha="$("$TOYBOX" cat "$EAC_SHA_FILE" 2>/dev/null || true)"
+    if [ "$current_sha" = "$expected_sha" ] && validate_eac_root "$EAC_ROOT"; then
+        return 0
+    fi
+
+    [ -f "$EAC_ARCHIVE" ] || { echo "Missing bundled EAC payload" >&2; exit 1; }
+    hash_output="$("$TOYBOX" sha256sum "$EAC_ARCHIVE")" || {
+        echo "Unable to hash bundled EAC payload" >&2
+        exit 1
+    }
+    actual_sha="${hash_output%% *}"
+    [ "$actual_sha" = "$expected_sha" ] || { echo "Invalid bundled EAC payload" >&2; exit 1; }
+
+    "$TOYBOX" rm -rf "$EAC_STAGING_ROOT" || exit 1
+    "$TOYBOX" mkdir -p "$EAC_STAGING_ROOT" || exit 1
+    "$TOYBOX" gzip -dc "$EAC_ARCHIVE" |
+        "$TOYBOX" tar -xf - -C "$EAC_STAGING_ROOT"
+    validate_eac_root "$EAC_STAGED_ROOT" || { echo "Incomplete staged EAC payload" >&2; exit 1; }
+    "$TOYBOX" printf '%s\n' "$expected_sha" > "$EAC_STAGED_ROOT/.payload-sha256.tmp" || exit 1
+    "$TOYBOX" mv "$EAC_STAGED_ROOT/.payload-sha256.tmp" "$EAC_STAGED_ROOT/.payload-sha256" || exit 1
+
+    EAC_HAD_LIVE=false
+    if path_exists "$EAC_ROOT"; then
+        "$TOYBOX" rm -rf "$EAC_BACKUP" || exit 1
+        "$TOYBOX" mv "$EAC_ROOT" "$EAC_BACKUP" || exit 1
+        EAC_HAD_LIVE=true
+    fi
+    EAC_SWAP_ACTIVE=true
+    trap 'rollback_eac_swap' EXIT
+    trap 'rollback_eac_on_signal 130' INT
+    trap 'rollback_eac_on_signal 143' TERM
+    "$TOYBOX" mv "$EAC_STAGED_ROOT" "$EAC_ROOT" || exit 1
+    validate_eac_root "$EAC_ROOT" || { echo "Incomplete installed EAC payload" >&2; exit 1; }
+    [ "$("$TOYBOX" cat "$EAC_SHA_FILE" 2>/dev/null || true)" = "$expected_sha" ] || exit 1
+    "$TOYBOX" rm -rf "$EAC_BACKUP" "$EAC_STAGING_ROOT" || exit 1
+    EAC_SWAP_ACTIVE=false
+    EAC_HAD_LIVE=false
+    trap - EXIT INT TERM
 }
 
 safe_owned_path() {
@@ -140,11 +232,29 @@ if [ -f "$COMMIT_FILE" ] || [ -f "$PROCESSED_PATHS" ]; then
     rollback_runtime_swap || { recovery_status=$?; exit "$recovery_status"; }
 fi
 
+MANIFEST="$PACKAGES_DIR/manifest.txt"
+[ -f "$MANIFEST" ] || { echo "Bundled runtime manifest is missing" >&2; exit 1; }
+EAC_EXPECTED_SHA=""
+while read -r expected relative; do
+    [ -z "$expected" ] && continue
+    relative="$("$TOYBOX" printf '%s' "$relative" | "$TOYBOX" tr -d '\r')" || exit 1
+    if [ "$relative" = "eac-runtime-arm64.tgz" ]; then
+        EAC_EXPECTED_SHA="$expected"
+    fi
+done < "$MANIFEST"
+case "$EAC_EXPECTED_SHA" in
+    ""|*[!0-9a-f]*) echo "Invalid EAC checksum in bundled runtime manifest" >&2; exit 1 ;;
+esac
+[ "${#EAC_EXPECTED_SHA}" -eq 64 ] || { echo "Invalid EAC checksum length" >&2; exit 1; }
+install_eac_payload "$EAC_EXPECTED_SHA"
+
 if [ "$("$TOYBOX" cat "$MARKER" 2>/dev/null || true)" = "$RUNTIME_VERSION" ] && \
     [ -f "$RUNTIME_OWNERSHIP" ] && \
     [ -x "$PREFIX/bin/node" ] && \
     [ -f "$PREFIX/lib/node_modules/@getpaseo/cli/package.json" ] && \
     [ -x "$PREFIX/bin/paseo" ] && \
+    [ -x "$PREFIX/bin/npm" ] && \
+    [ -x "$PREFIX/bin/pnpm" ] && \
     { [ "$CODEX_STRICT" != "true" ] || [ -x "$PREFIX/bin/codex" ]; }; then
     exit 0
 fi
@@ -157,7 +267,7 @@ while read -r expected relative; do
     hash_output="$("$TOYBOX" sha256sum "$payload")" || { echo "Unable to hash bundled runtime payload: $relative" >&2; exit 1; }
     actual="${hash_output%% *}"
     [ "$actual" = "$expected" ] || { echo "Invalid bundled runtime payload: $relative" >&2; exit 1; }
-done < "$PACKAGES_DIR/manifest.txt"
+done < "$MANIFEST"
 
 "$TOYBOX" rm -rf "$STAGING_ROOT" "$BACKUP_PREFIX" || exit 1
 "$TOYBOX" mkdir -p "$STAGED_PREFIX" "$BACKUP_PREFIX" || exit 1
@@ -213,7 +323,7 @@ for entry in "$STAGED_PREFIX/lib/node_modules"/* "$STAGED_PREFIX/lib/node_module
         *) append_owned_path "$entry" ;;
     esac
 done
-"$TOYBOX" printf '%s\n' 'bin/paseo' 'bin/codex' >> "$NEW_OWNERSHIP" || exit 1
+"$TOYBOX" printf '%s\n' 'bin/paseo' 'bin/codex' 'bin/npm' 'bin/pnpm' >> "$NEW_OWNERSHIP" || exit 1
 "$TOYBOX" sort -u "$NEW_OWNERSHIP" -o "$NEW_OWNERSHIP" || exit 1
 if [ -f "$RUNTIME_OWNERSHIP" ]; then
     "$TOYBOX" cp "$RUNTIME_OWNERSHIP" "$BACKUP_PREFIX/.old-ownership" || exit 1
@@ -254,17 +364,36 @@ done < "$ALL_OWNERSHIP"
 "$TOYBOX" rm -f "$PREFIX/bin/paseo" || exit 1
 "$TOYBOX" printf '%s\n' \
     '#!/system/bin/sh' \
-    'PREFIX="${PREFIX:-/data/data/com.paseoe/files/usr}"' \
+    'PREFIX="${PREFIX:-/data/data/com.dshcli/files/usr}"' \
     'exec "$PREFIX/bin/node" --disable-warning=DEP0040 "$PREFIX/lib/node_modules/@getpaseo/cli/bin/paseo" "$@"' \
     > "$PREFIX/bin/paseo" || exit 1
 "$TOYBOX" chmod 755 "$PREFIX/bin/paseo" || exit 1
 "$TOYBOX" rm -f "$PREFIX/bin/codex" || exit 1
 "$TOYBOX" printf '%s\n' \
     '#!/system/bin/sh' \
-    'PREFIX="${PREFIX:-/data/data/com.paseoe/files/usr}"' \
+    'PREFIX="${PREFIX:-/data/data/com.dshcli/files/usr}"' \
     'exec "$PREFIX/bin/node" "$PREFIX/lib/node_modules/@openai/codex/bin/codex.js" "$@"' \
     > "$PREFIX/bin/codex" || exit 1
 "$TOYBOX" chmod 755 "$PREFIX/bin/codex" || exit 1
+# npm / pnpm wrappers: the kernel installs plugins by shelling out to them over
+# PATH ($PREFIX/bin:/system/bin:/system/xbin). Both are pure JS, so they run on
+# the bundled node; a shebang lookup is not an option because Termux has no
+# /usr/bin/env. Entry-point names differ per tool (npm-cli.js vs pnpm.cjs) and
+# are asserted in the payload at assembly time.
+"$TOYBOX" rm -f "$PREFIX/bin/npm" || exit 1
+"$TOYBOX" printf '%s\n' \
+    '#!/system/bin/sh' \
+    'PREFIX="${PREFIX:-/data/data/com.dshcli/files/usr}"' \
+    'exec "$PREFIX/bin/node" "$PREFIX/lib/node_modules/npm/bin/npm-cli.js" "$@"' \
+    > "$PREFIX/bin/npm" || exit 1
+"$TOYBOX" chmod 755 "$PREFIX/bin/npm" || exit 1
+"$TOYBOX" rm -f "$PREFIX/bin/pnpm" || exit 1
+"$TOYBOX" printf '%s\n' \
+    '#!/system/bin/sh' \
+    'PREFIX="${PREFIX:-/data/data/com.dshcli/files/usr}"' \
+    'exec "$PREFIX/bin/node" "$PREFIX/lib/node_modules/pnpm/bin/pnpm.cjs" "$@"' \
+    > "$PREFIX/bin/pnpm" || exit 1
+"$TOYBOX" chmod 755 "$PREFIX/bin/pnpm" || exit 1
 
 if ! NODE_VERSION="$("$PREFIX/bin/node" --version)"; then
     echo "Bundled Node.js is unavailable" >&2

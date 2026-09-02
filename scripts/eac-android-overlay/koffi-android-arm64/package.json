@@ -1,0 +1,8 @@
+{
+  "name": "@koromix/koffi-android-arm64",
+  "version": "3.1.5",
+  "description": "Android/arm64 placeholder for koffi. Satisfies koffi's module-level type registration so packages whose koffi use is confined to Windows-only code paths can be imported on Android; every real FFI operation throws.",
+  "main": "index.cjs",
+  "license": "MIT"
+}
+

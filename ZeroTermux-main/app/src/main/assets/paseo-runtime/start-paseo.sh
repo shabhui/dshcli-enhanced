@@ -118,17 +118,34 @@ detect_commands() {
 }
 
 detect_commands
-DEVICE_ARCH="$("$TOYBOX" uname -m 2>/dev/null || echo unknown)"
+# `uname -m` reports the kernel, not this process. On a translating device the two disagree:
+# the x86_64 emulator answers x86_64 while the arm64-only APK runs as arm64-v8a. The prompt
+# tells the Agent to choose native downloads by this value, so the kernel answer sends it
+# after binaries that cannot execute here. The bundled node is the arm64 build, so its
+# process.arch is what will actually run; fall back only if node cannot answer.
+DEVICE_ARCH="$("$NODE" -p 'process.arch' 2>/dev/null || echo "")"
+if [ -z "$DEVICE_ARCH" ]; then
+    DEVICE_ARCH="$(getprop ro.product.cpu.abi 2>/dev/null || echo "")"
+fi
+if [ -z "$DEVICE_ARCH" ]; then
+    DEVICE_ARCH="$("$TOYBOX" uname -m 2>/dev/null || echo unknown)"
+fi
+KERNEL_ARCH="$("$TOYBOX" uname -m 2>/dev/null || echo unknown)"
+DEVICE_ABILIST="$(getprop ro.product.cpu.abilist 2>/dev/null || echo unknown)"
 ANDROID_RELEASE="$(getprop ro.build.version.release 2>/dev/null || echo unknown)"
 ANDROID_SDK="$(getprop ro.build.version.sdk 2>/dev/null || echo unknown)"
-log "Agent environment prompt: arch=$DEVICE_ARCH android=$ANDROID_RELEASE sdk=$ANDROID_SDK"
+log "Agent environment prompt: arch=$DEVICE_ARCH kernel=$KERNEL_ARCH android=$ANDROID_RELEASE sdk=$ANDROID_SDK"
 log "Agent environment prompt: detected=$DETECTED_COMMANDS"
 
 "$TOYBOX" cat > "$PASEO_BASE_SYSTEM_PROMPT_FILE" <<PASEO_AGENT_ENVIRONMENT_FACTS
 You are running inside Paseo Enhanced in an Android application sandbox, not on a desktop computer.
 
 This device, detected at startup:
-- Android $ANDROID_RELEASE (API $ANDROID_SDK), architecture $DEVICE_ARCH.
+- Android $ANDROID_RELEASE (API $ANDROID_SDK).
+- Architecture: $DEVICE_ARCH. This is what this process actually executes as, reported by the
+  bundled Node runtime. Build and download for this, not for the kernel.
+- Kernel reports: $KERNEL_ARCH. Supported ABIs: $DEVICE_ABILIST. When the kernel disagrees with
+  the architecture above, the device is translating and \`uname -m\` is misleading here.
 - HOME=$HOME
 - PREFIX=$PREFIX
 - TMPDIR=${TMPDIR:-$PREFIX/tmp}
@@ -145,9 +162,9 @@ the user installs something, re-check with `command -v <name>` rather than trust
 
 Environment facts:
 - OS/runtime: Android with a Termux-compatible userland. Do not assume Windows, macOS, desktop Linux, WSL, systemd, Docker, or a graphical desktop.
-- App package: com.paseoe.
-- Use the HOME, PREFIX, TMPDIR, and PATH values above. Do not hardcode com.termux paths. Private app files normally live under /data/user/0/com.paseoe/files (also reachable through Android's /data/data alias where available).
-- Check the architecture above before downloading any native binary. Never download or run Windows .exe installers.
+- App package: com.dshcli.
+- Use the HOME, PREFIX, TMPDIR, and PATH values above. Do not hardcode com.termux paths. Private app files normally live under /data/user/0/com.dshcli/files (also reachable through Android's /data/data alias where available).
+- Check the architecture above before downloading any native binary, and use the process architecture rather than `uname -m`. Never download or run Windows .exe installers.
 - Android scoped storage and app permissions apply. Work only in the current workspace or paths the user selected and the app can access.
 - There is no graphical display, no desktop session, and no service manager. Long-running work must be a plain background process.
 

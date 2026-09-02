@@ -16,30 +16,30 @@ public class PaseoManifestTest {
     private static final String TOOLS_NS = "http://schemas.android.com/tools";
 
     @Test
-    public void standaloneManifestDisablesBackupAndLimitsCleartextToLoopback() throws Exception {
+    public void standaloneManifestDisablesBackupAndPermitsCleartextForLanComputers()
+            throws Exception {
         Document manifest = parse(new File("src/main/AndroidManifest.xml"));
         Element application = (Element) manifest.getElementsByTagName("application").item(0);
 
         assertEquals("false", application.getAttributeNS(ANDROID_NS, "allowBackup"));
-        assertEquals("false", application.getAttributeNS(ANDROID_NS, "usesCleartextTraffic"));
         assertEquals("@xml/network_security_config",
             application.getAttributeNS(ANDROID_NS, "networkSecurityConfig"));
+        // manifest 上这个属性留着 false 是<b>无害</b>的:networkSecurityConfig 一旦存在就优先于它。
+        // 真机验证过 —— 配置里放行某个 host 时请求确实发得出去,尽管这里写着 false。
+        assertEquals("false", application.getAttributeNS(ANDROID_NS, "usesCleartextTraffic"));
 
+        // 从「只放行回环」改成「全局放行」是为了「连接电脑」:电脑上的 DSH 默认是明文服务,
+        // 而这个文件是编译期静态的,写不了网段。base-config 为 false 时请求在平台层就被丢掉,
+        // 服务端收不到任何东西、logcat 不报错,用户只看到白屏。理由写在 xml 的注释里。
         Document networkConfig = parse(new File("src/main/res/xml/network_security_config.xml"));
         Element baseConfig = (Element) networkConfig.getElementsByTagName("base-config").item(0);
-        Element domainConfig = (Element) networkConfig.getElementsByTagName("domain-config").item(0);
-        Element domain = (Element) networkConfig.getElementsByTagName("domain").item(0);
-        assertEquals("false", baseConfig.getAttribute("cleartextTrafficPermitted"));
-        assertEquals("true", domainConfig.getAttribute("cleartextTrafficPermitted"));
-        assertEquals("127.0.0.1", domain.getTextContent().trim());
+        assertEquals("true", baseConfig.getAttribute("cleartextTrafficPermitted"));
+        // 全局放行之后 domain-config 就是死配置,留着只会让人以为还有范围限制。
+        assertEquals(0, networkConfig.getElementsByTagName("domain-config").getLength());
     }
 
-    @Test
-    public void launcherNameIsPaseoEnhancedInEveryBundledLocale() throws Exception {
-        assertEquals("Paseo Enhanced", stringValue(new File("src/main/res/values/strings.xml"), "app_name"));
-        assertEquals("Paseo Enhanced", stringValue(new File("src/main/res/values-en/strings.xml"), "app_name"));
-        assertEquals("Paseo Enhanced", stringValue(new File("src/main/res/values-zh-rCN/strings.xml"), "app_name"));
-    }
+    // 启动器名字的断言集中在 PaseoBrandingTest —— 那里连「旧名不得残留」一起钉住,
+    // 两处各写一份只会在改名时给出互相矛盾的结论。
 
     @Test
     public void onlyTheStandaloneLauncherRemainsPublicAmongLegacyEntryPoints() throws Exception {
@@ -88,16 +88,6 @@ public class PaseoManifestTest {
             }
         }
         throw new AssertionError("Missing component " + componentName);
-    }
-
-    private static String stringValue(File file, String name) throws Exception {
-        Document document = parse(file);
-        NodeList strings = document.getElementsByTagName("string");
-        for (int index = 0; index < strings.getLength(); index++) {
-            Element element = (Element) strings.item(index);
-            if (name.equals(element.getAttribute("name"))) return element.getTextContent().trim();
-        }
-        throw new AssertionError("Missing string " + name + " in " + file);
     }
 
     private static Document parse(File file) throws Exception {

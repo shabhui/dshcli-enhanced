@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Visual tokens adapted from DSHA's MIT-licensed launch surface. -->
+<resources>
+    <color name="paseo_dsha_primary">#3D6FD4</color>
+    <color name="paseo_dsha_accent_on">#FFFFFF</color>
+    <color name="paseo_dsha_surface">#F7F8FB</color>
+    <color name="paseo_dsha_card">#FFFFFF</color>
+    <color name="paseo_dsha_raised">#EEF1F6</color>
+    <color name="paseo_dsha_line">#E2E6EE</color>
+    <color name="paseo_dsha_text">#1A2230</color>
+    <color name="paseo_dsha_text_secondary">#4A5568</color>
+    <color name="paseo_dsha_text_muted">#7A8494</color>
+    <color name="paseo_dsha_ok">#2F9E64</color>
+    <color name="paseo_dsha_warn">#C48A1A</color>
+    <color name="paseo_dsha_err">#C45A5A</color>
+    <color name="paseo_dsha_preview">#F0F3F8</color>
+    <color name="paseo_dsha_ripple">#233D6FD4</color>
+    <color name="paseo_dsha_disabled">#E9ECF2</color>
+
+    <dimen name="paseo_dsha_page_pad">20dp</dimen>
+    <dimen name="paseo_dsha_card_pad">16dp</dimen>
+    <dimen name="paseo_dsha_gap_control">12dp</dimen>
+    <dimen name="paseo_dsha_gap_tight">8dp</dimen>
+    <dimen name="paseo_dsha_gap_hair">4dp</dimen>
+    <dimen name="paseo_dsha_radius_card">8dp</dimen>
+    <dimen name="paseo_dsha_radius_control">8dp</dimen>
+    <dimen name="paseo_dsha_radius_pill">8dp</dimen>
+    <dimen name="paseo_dsha_text_title">17sp</dimen>
+    <dimen name="paseo_dsha_text_body">15sp</dimen>
+    <dimen name="paseo_dsha_text_label">13sp</dimen>
+    <dimen name="paseo_dsha_text_caption">12sp</dimen>
+    <dimen name="paseo_dsha_btn_height">48dp</dimen>
+    <dimen name="paseo_dsha_touch_min">44dp</dimen>
+    <dimen name="paseo_dsha_progress_thin">3dp</dimen>
+    <dimen name="paseo_dsha_stroke">1dp</dimen>
+
+    <style name="DshaText.Title" parent="">
+        <item name="android:textSize">@dimen/paseo_dsha_text_title</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/paseo_dsha_text</item>
+    </style>
+
+    <style name="DshaText.Label" parent="">
+        <item name="android:textSize">@dimen/paseo_dsha_text_label</item>
+        <item name="android:textColor">@color/paseo_dsha_text_secondary</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
+
+    <style name="DshaText.Caption" parent="">
+        <item name="android:textSize">@dimen/paseo_dsha_text_caption</item>
+        <item name="android:textColor">@color/paseo_dsha_text_muted</item>
+        <item name="android:lineSpacingExtra">2dp</item>
+    </style>
+
+    <style name="DshaCard" parent="">
+        <item name="android:background">@drawable/paseo_dsha_bg_card</item>
+        <item name="android:padding">@dimen/paseo_dsha_card_pad</item>
+        <item name="android:orientation">vertical</item>
+    </style>
+</resources>

@@ -1,7 +1,7 @@
-#!/data/data/com.paseoe/files/usr/bin/sh
+#!/data/data/com.dshcli/files/usr/bin/sh
 am broadcast --user 0 \
-		 --es com.paseoe.app.reload_style contactperson \
-		 -a com.paseoe.app.reload_style com.paseoe > /dev/null
+		 --es com.dshcli.app.reload_style contactperson \
+		 -a com.dshcli.app.reload_style com.dshcli > /dev/null
 
 
 echo "远程控制下请先安装vim,否则程序不会创建sms.txt以及phone.txt"

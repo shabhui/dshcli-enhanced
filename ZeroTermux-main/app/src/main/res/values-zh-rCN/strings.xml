@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<!DOCTYPE resources [<!ENTITY TERMUX_PACKAGE_NAME "com.paseoe"><!ENTITY TERMUX_APP_NAME "ZeroTermux"><!ENTITY TERMUX_API_APP_NAME "Termux:API"><!ENTITY TERMUX_BOOT_APP_NAME "Termux:Boot"><!ENTITY TERMUX_FLOAT_APP_NAME "Termux:Float"><!ENTITY TERMUX_STYLING_APP_NAME "Termux:Styling"><!ENTITY TERMUX_TASKER_APP_NAME "Termux:Tasker"><!ENTITY TERMUX_WIDGET_APP_NAME "Termux:Widget"><!ENTITY TERMUX_PROPERTIES_PRIMARY_PATH_SHORT "~/.termux/termux.properties">]>
+<!DOCTYPE resources [<!ENTITY TERMUX_PACKAGE_NAME "com.dshcli"><!ENTITY TERMUX_APP_NAME "ZeroTermux"><!ENTITY TERMUX_API_APP_NAME "Termux:API"><!ENTITY TERMUX_BOOT_APP_NAME "Termux:Boot"><!ENTITY TERMUX_FLOAT_APP_NAME "Termux:Float"><!ENTITY TERMUX_STYLING_APP_NAME "Termux:Styling"><!ENTITY TERMUX_TASKER_APP_NAME "Termux:Tasker"><!ENTITY TERMUX_WIDGET_APP_NAME "Termux:Widget"><!ENTITY TERMUX_PROPERTIES_PRIMARY_PATH_SHORT "~/.termux/termux.properties">]>
 
 <resources xmlns:tools="http://schemas.android.com/tools">
     <string name="application_name">&TERMUX_APP_NAME;</string>
     <string name="shared_user_label">ZeroTermux 用户</string>
 
-    <string name="app_name">Paseo Enhanced</string>
+    <string name="app_name">DSHA</string>
 
     <!-- Termux RUN_COMMAND permission -->
     <string name="permission_run_command_label">运行命令 &TERMUX_APP_NAME; 环境</string>
@@ -1448,8 +1448,8 @@
         ln[ \n
         说明：当前目录 内部存储路径 \n
         注意：两个路径都必须是全路径 \n
-        示例：ln /data/data/com.paseoe/files/home/自定义名称 /sdcard/ \n
-        示例(或指定一个目录)：ln /data/data/com.paseoe/files/home/自定义名称 /sdcard/自定义目录/ \n
+        示例：ln /data/data/com.dshcli/files/home/自定义名称 /sdcard/ \n
+        示例(或指定一个目录)：ln /data/data/com.dshcli/files/home/自定义名称 /sdcard/自定义目录/ \n
         ] \n
              \n
         \n
@@ -1467,8 +1467,8 @@
         zt backgroundimage(bgi) 图片路径(设置当前终端背景)\n
         backgroundimage(bgi)[\n
         使用帮助(必须全路径):\n
-        zt backgroundimage /data/data/com.paseoe/files/home/.img/back.jpg \n
-        zt bgi /data/data/com.paseoe/files/home/.img/back.jpg \n
+        zt backgroundimage /data/data/com.dshcli/files/home/.img/back.jpg \n
+        zt bgi /data/data/com.dshcli/files/home/.img/back.jpg \n
         ]\n
         \n
          zt qr 打开扫一扫 (扫描二维码或者条形码)\n
@@ -2005,11 +2005,39 @@
     <string name="zt_crash_history_thread">线程: %1$s · 版本: %2$s</string>
     <string name="zt_crash_history_detail_meta">时间: %1$s\n线程: %2$s\n版本: %3$s\n异常: %4$s\n消息: %5$s</string>
     <string name="paseo_no_browser">没有可用的浏览器来打开此链接。</string>
+    <string name="paseo_state_preparing">正在准备 EAC</string>
+    <string name="paseo_state_starting">EAC 正在启动</string>
+    <string name="paseo_state_running">EAC 正在运行</string>
+    <string name="paseo_state_stopped">EAC 已停止</string>
+    <string name="paseo_state_error">EAC 启动失败</string>
+    <string name="paseo_endpoint_label">打开或复制本地地址</string>
+    <string name="paseo_endpoint_format">本机 · %1$s</string>
+    <string name="paseo_log_title">日志 · dsh-web.log</string>
+    <string name="paseo_logs_empty">还没有 EAC 日志。</string>
+    <string name="paseo_action_start">启动</string>
+    <string name="paseo_action_enter">进入</string>
+    <string name="paseo_action_restart">重启</string>
+    <string name="paseo_action_stop">停止</string>
+    <string name="paseo_action_port">端口</string>
+    <string name="paseo_action_copy_address">复制地址</string>
+    <string name="paseo_action_refresh_log">刷新日志</string>
+    <string name="paseo_status_starting_eac">正在启动 EAC Web 服务</string>
+    <string name="paseo_status_eac_stopped">EAC 已由用户停止</string>
+    <string name="paseo_address_copied">已复制本地地址</string>
     <string name="paseo_port_title">Paseo 端口</string>
-    <string name="paseo_port_message">请选择本地服务和网页端口。端口 6768 已被内部 Codex 代理占用。</string>
-    <string name="paseo_port_confirm">启动</string>
+    <string name="paseo_port_message">修改 Paseo 的后备端口。EAC 始终使用 sidecar 实际返回的端口。端口 6768 已被内部 Codex 代理占用。</string>
+    <string name="paseo_port_confirm">应用</string>
     <string name="paseo_port_exit">退出</string>
     <string name="paseo_port_error">请输入 1024 至 65535 之间的端口，不能使用 6768。</string>
+    <string name="paseo_action_connect_computer">连接电脑</string>
+    <string name="paseo_remote_title">连接电脑</string>
+    <string name="paseo_remote_message">打开电脑上正在跑的 DSH，随时看它的进度。可以直接粘贴电脑打印的那条地址（其中的 token 只能用一次），也可以只填 主机:端口。前提是电脑那边允许本网络访问。</string>
+    <string name="paseo_remote_hint">192.168.1.7:6767</string>
+    <string name="paseo_remote_confirm">连接</string>
+    <string name="paseo_remote_disconnect">断开</string>
+    <string name="paseo_remote_error">请按 主机:端口 填写电脑地址。回环地址指的是这台手机，连本机请用「进入」。</string>
+    <string name="paseo_remote_connected">电脑 · %1$s</string>
+    <string name="paseo_remote_disconnected">已断开与电脑的连接</string>
     <string name="paseo_action_retry">重试</string>
     <string name="paseo_action_open_terminal">打开终端</string>
     <string name="paseo_status_preparing_terminal">正在准备内置终端</string>

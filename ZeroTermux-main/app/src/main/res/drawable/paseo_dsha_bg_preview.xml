@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/paseo_dsha_preview" />
+    <corners android:radius="@dimen/paseo_dsha_radius_card" />
+    <stroke
+        android:width="@dimen/paseo_dsha_stroke"
+        android:color="@color/paseo_dsha_line" />
+</shape>

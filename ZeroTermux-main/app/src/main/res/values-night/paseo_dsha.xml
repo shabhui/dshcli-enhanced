@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="paseo_dsha_primary">#7DA7F4</color>
+    <color name="paseo_dsha_accent_on">#0B1524</color>
+    <color name="paseo_dsha_surface">#10141B</color>
+    <color name="paseo_dsha_card">#161B24</color>
+    <color name="paseo_dsha_raised">#1C2330</color>
+    <color name="paseo_dsha_line">#2A3344</color>
+    <color name="paseo_dsha_text">#E8ECF4</color>
+    <color name="paseo_dsha_text_secondary">#A6B0C3</color>
+    <color name="paseo_dsha_text_muted">#6B7689</color>
+    <color name="paseo_dsha_ok">#7ED6A2</color>
+    <color name="paseo_dsha_warn">#E5C07B</color>
+    <color name="paseo_dsha_err">#E08A8A</color>
+    <color name="paseo_dsha_preview">#0A0D12</color>
+    <color name="paseo_dsha_ripple">#337DA7F4</color>
+    <color name="paseo_dsha_disabled">#1B2130</color>
+</resources>

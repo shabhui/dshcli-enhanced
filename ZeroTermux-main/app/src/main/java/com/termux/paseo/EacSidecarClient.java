@@ -33,6 +33,10 @@ public final class EacSidecarClient {
         void onWebReady(String webUrl, int port);
 
         void onFailed(String error);
+
+        default void onLog(String message) {}
+
+        default void onServerDied(String error, String logPath) {}
     }
 
     /** Diagnostic sink. Defaults to {@code Log.i}; injected in tests so output is assertable. */
@@ -56,13 +60,21 @@ public final class EacSidecarClient {
     private final AtomicInteger nextId = new AtomicInteger(1);
     /** Latches on the first outcome so exactly one listener callback ever fires. */
     private final AtomicBoolean settled = new AtomicBoolean(false);
+    /** Distinguishes a delivered ready outcome from a delivered startup failure. */
+    private final AtomicBoolean webReady = new AtomicBoolean(false);
+    /** A server-died notification and protocol EOF can describe the same event. */
+    private final AtomicBoolean serverDeathReported = new AtomicBoolean(false);
+    private final AtomicBoolean stopping = new AtomicBoolean(false);
     private final Object writeLock = new Object();
 
     private volatile LineWriter lineWriter;
     private volatile Process process;
 
     public EacSidecarClient(Listener listener) {
-        this(listener, message -> Log.i(TAG, message));
+        this(listener, message -> {
+            Log.i(TAG, message);
+            listener.onLog(message);
+        });
     }
 
     EacSidecarClient(Listener listener, LogSink logSink) {
@@ -81,6 +93,12 @@ public final class EacSidecarClient {
         File home = PaseoHome.directory(filesDirectory);
         builder.directory(home);
         PaseoProcessEnvironment.apply(builder.environment(), filesDirectory);
+        File sidecarDirectory = new File(sidecarEntry).getAbsoluteFile().getParentFile();
+        File resourceRoot = sidecarDirectory == null ? null : sidecarDirectory.getParentFile();
+        if (resourceRoot == null) {
+            throw new IOException("EAC sidecar entry has no resource root: " + sidecarEntry);
+        }
+        builder.environment().put("DSH_RESOURCE_ROOT", resourceRoot.getAbsolutePath());
         // Never redirectErrorStream: stderr carries `[sidecar] ...` human logs, and merging them
         // into stdout corrupts the protocol stream.
         Process started = builder.start();
@@ -112,7 +130,10 @@ public final class EacSidecarClient {
             } catch (IOException closed) {
                 logSink.log(name + " closed: " + closed.getMessage());
             }
-            if (protocol) fail("sidecar exited before the web service was ready");
+            if (protocol) {
+                reportServerDeath(
+                    "sidecar exited before the web service was ready", "");
+            }
         }, name);
         thread.setDaemon(true);
         thread.start();
@@ -183,12 +204,10 @@ public final class EacSidecarClient {
                 fail(params == null ? "" : params.optString("error", ""));
                 return;
             case "boot.server-died":
-                // After the WebView holds a URL this belongs to the restart path, not to startup.
-                // Reporting it as a boot failure would swap a working page for an error screen.
-                if (!settled.get()) {
-                    fail("the web service exited (code " +
-                        (params == null ? "?" : params.optString("code", "?")) + ")");
-                }
+                reportServerDeath(
+                    "the web service exited (code " +
+                        (params == null ? "?" : params.optString("code", "?")) + ")",
+                    params == null ? "" : params.optString("logPath", ""));
                 return;
             default:
                 logSink.log("notification " + method);
@@ -205,12 +224,26 @@ public final class EacSidecarClient {
         }
         // boot.start's result and boot.web-ready carry the same information and both arrive; order
         // is not guaranteed, so first one wins and the second is a no-op rather than an error.
-        if (settled.compareAndSet(false, true)) listener.onWebReady(webUrl, port);
+        if (settled.compareAndSet(false, true)) {
+            webReady.set(true);
+            listener.onWebReady(webUrl, port);
+        }
     }
 
     private void fail(String error) {
         if (!settled.compareAndSet(false, true)) return;
         listener.onFailed(error == null || error.isEmpty() ? "the web service failed to start" : error);
+    }
+
+    private void reportServerDeath(String error, String logPath) {
+        if (stopping.get()) return;
+        if (!webReady.get()) {
+            if (!settled.get()) fail(error);
+            return;
+        }
+        if (serverDeathReported.compareAndSet(false, true)) {
+            listener.onServerDied(error, logPath == null ? "" : logPath);
+        }
     }
 
     int beginBootStart() {
@@ -267,11 +300,12 @@ public final class EacSidecarClient {
     }
 
     public boolean isReady() {
-        return settled.get();
+        return webReady.get();
     }
 
     /** Asks for a clean shutdown, waits a bounded while, then kills. */
     public void stop() {
+        stopping.set(true);
         Process current = process;
         process = null;
         if (current == null) return;

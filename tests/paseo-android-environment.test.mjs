@@ -49,11 +49,35 @@ test("the environment prompt reports what the device actually has, not a fixed l
   // the rules heredoc stays quoted (its backticks and $ are literal prose).
   assert.match(startup, /<<PASEO_AGENT_ENVIRONMENT_FACTS\n/u);
   assert.match(startup, /<<'PASEO_AGENT_ENVIRONMENT'\n/u);
-  assert.match(startup, /uname -m/u);
   assert.match(startup, /getprop ro\.build\.version\.release/u);
   assert.match(startup, /getprop ro\.build\.version\.sdk/u);
   assert.match(startup, /- HOME=\$HOME/u);
   assert.match(startup, /- PATH=\$PATH/u);
+});
+
+test("the reported architecture is the one native binaries actually run as", async () => {
+  const startup = await source(
+    "ZeroTermux-main/app/src/main/assets/paseo-runtime/start-paseo.sh",
+  );
+
+  // `uname -m` reports the kernel, which disagrees with the app on any device that
+  // translates: this emulator answers x86_64 while the arm64-only APK runs as
+  // primaryCpuAbi=arm64-v8a. The prompt tells the Agent to pick native downloads by this
+  // value, so the kernel answer sends it after binaries that cannot execute. The bundled
+  // node is the arm64 build, so its process.arch is what will actually run.
+  const archLine = startup.match(/^DEVICE_ARCH=.*$/mu)?.[0] || "";
+  assert.ok(archLine, "the prompt must resolve a device architecture");
+  assert.match(archLine, /process\.arch/u);
+
+  // node only exists after the runtime install, and getprop/uname must not win over it.
+  const installIndex = startup.indexOf("install-bundled-runtime.sh");
+  const archIndex = startup.indexOf("DEVICE_ARCH=");
+  assert.ok(installIndex > 0 && installIndex < archIndex, "node must be installed first");
+  assert.doesNotMatch(archLine, /^DEVICE_ARCH="\$\("\$TOYBOX" uname -m/u);
+
+  // A translating device has to be called out, or the Agent silently trusts one value.
+  assert.match(startup, /ro\.product\.cpu\.abilist/u);
+  assert.match(startup, /translat/iu);
 
   // A hardcoded inventory is exactly what the probe replaced; it goes stale silently.
   assert.doesNotMatch(startup, /Baseline shell tools include/u);

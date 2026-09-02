@@ -98,6 +98,48 @@ public class PaseoRuntimeControllerTest {
     }
 
     @Test
+    public void anInstalledLauncherTakesOverInsteadOfSpawningTheDaemon() throws Exception {
+        String source = new String(Files.readAllBytes(new File(
+            "src/main/java/com/termux/paseo/PaseoRuntimeController.java").toPath()),
+            StandardCharsets.UTF_8);
+
+        // The branch point sits after the runtime assets are installed and before paseo's own
+        // daemon is spawned, so the EAC path reuses bootstrap + asset install and replaces only
+        // the launch step.
+        assertTrue(source.contains("RuntimeLauncher"));
+        assertTrue(source.contains("interface RuntimeLauncher"));
+        assertTrue(source.contains("launcher.launch(runtimeDirectory)"));
+        // Null or a launcher that declines must fall through to the unchanged paseo path.
+        assertTrue(source.contains("launcher == null || !launcher.launch(runtimeDirectory)"));
+        assertTrue(source.contains("startPaseoTask(generation, runtimeDirectory)"));
+    }
+
+    @Test
+    public void runtimePrefixIsInstalledBeforeTheLauncherAndStaleSuccessIsIgnored() throws Exception {
+        String source = new String(Files.readAllBytes(new File(
+            "src/main/java/com/termux/paseo/PaseoRuntimeController.java").toPath()),
+            StandardCharsets.UTF_8);
+        int preparation = source.indexOf("runtimePreparer.prepare(");
+        int workerStart = source.indexOf("() -> {", preparation);
+        int callbackStart = source.indexOf("() -> {", workerStart + 1);
+        int failure = source.indexOf("error ->", callbackStart);
+        String worker = source.substring(workerStart, callbackStart);
+        String callback = source.substring(callbackStart, failure);
+
+        assertTrue(worker.contains("PaseoRuntimePrefixInstaller.install("));
+        assertTrue(callback.contains("if (!isCurrentRun(generation)) return;"));
+        assertTrue(callback.indexOf("isCurrentRun(generation)") <
+            callback.indexOf("launcher.launch(runtimeDirectory)"));
+    }
+
+    @Test
+    public void theLauncherDecisionIsIndependentOfActivityState() {
+        // A pure decision so it is exercisable without an Activity: EAC present means take over.
+        File runtime = new File("/nonexistent/runtime");
+        assertFalse(EacRuntimeLayout.isInstalled(runtime));
+    }
+
+    @Test
     public void startupScriptAcceptsAndUsesTheSelectedPort() throws Exception {
         String script = new String(Files.readAllBytes(new File(
             "src/main/assets/paseo-runtime/start-paseo.sh").toPath()), StandardCharsets.UTF_8);

@@ -4,6 +4,8 @@
   "private": true,
   "dependencies": {
     "@getpaseo/cli": "0.3.1",
-    "@openai/codex": "0.147.0"
+    "@openai/codex": "0.147.0",
+    "npm": "11.16.0",
+    "pnpm": "11.7.0"
   }
 }

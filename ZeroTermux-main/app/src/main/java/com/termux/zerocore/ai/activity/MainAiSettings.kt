@@ -52,7 +52,7 @@ class MainAiSettings : BaseTitleActivity() {
             Intent(
                 this@MainAiSettings,
                 TermuxService::class.java
-            ).setAction("com.paseoe.service_stop")
+            ).setAction("com.dshcli.service_stop")
             System.exit(0)
             finish()
         }

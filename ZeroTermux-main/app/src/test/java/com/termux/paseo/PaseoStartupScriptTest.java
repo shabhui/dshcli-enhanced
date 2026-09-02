@@ -43,7 +43,7 @@ public class PaseoStartupScriptTest {
         assertFalse(installer.contains("pkg update"));
         assertFalse(installer.contains("npm install"));
         assertTrue(runtimePreparation.contains("termux-node-runtime-arm64.tgz"));
-        assertTrue(runtimePreparation.contains("com.paseoe"));
+        assertTrue(runtimePreparation.contains("com.dshcli"));
         assertTrue(script.contains("\"$NODE\" \"$DAEMON_WORKER\" --no-relay --web-ui &"));
         assertTrue(script.contains("\"$NODE\" \"$RUNTIME_DIR/enhanced/install.mjs\""));
         assertTrue(script.contains("BUNDLED_FINGERPRINT_FILE=\"$RUNTIME_DIR/asset-fingerprint\""));
@@ -248,8 +248,10 @@ public class PaseoStartupScriptTest {
         assertTrue(runtimePreparation.contains("lib/libcrypto.so.3"));
         assertTrue(runtimePreparation.contains("lib/libssl.so.3"));
         assertTrue(runtimePreparation.contains("lib/libz.so.1"));
+        // $tar is the pinned Windows bsdtar; a bare tar.exe would resolve through
+        // PATH and pick up GNU tar, which rejects drive-letter archive paths.
         assertTrue(runtimePreparation.contains(
-            "tar.exe --format=ustar -czf $termuxArchive"));
+            "$tar --format=ustar -czf $termuxArchive"));
     }
 
     @Test
@@ -323,7 +325,8 @@ public class PaseoStartupScriptTest {
         String runtimeVersion = new String(
             Files.readAllBytes(runtimeVersionFile.toPath()), StandardCharsets.UTF_8);
 
-        assertTrue(installer.contains("RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-arm64-v8\""));
+        assertTrue(installer.contains(
+            "RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.1-arm64-v10\""));
         assertTrue(runtimeVersion.contains("runtime-15"));
         assertTrue(installer.contains("[ -f \"$RUNTIME_OWNERSHIP\" ]"));
     }

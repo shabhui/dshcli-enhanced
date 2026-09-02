@@ -15,11 +15,11 @@ public class PaseoProcessEnvironmentTest {
     @Test
     public void createsAnAppOwnedRuntimeEnvironmentWithoutTermuxExec() {
         Map<String, String> inherited = new LinkedHashMap<>();
-        inherited.put("LD_PRELOAD", "/data/data/com.paseoe/files/usr/lib/libtermux-exec.so");
+        inherited.put("LD_PRELOAD", "/data/data/com.dshcli/files/usr/lib/libtermux-exec.so");
         inherited.put("LD_LIBRARY_PATH", "/data/data/com.termux/files/usr/lib");
         inherited.put("ANDROID_ROOT", "/system");
 
-        File filesDirectory = new File("/data/user/0/com.paseoe/files");
+        File filesDirectory = new File("/data/user/0/com.dshcli/files");
         PaseoProcessEnvironment.apply(inherited, filesDirectory);
 
         assertFalse(inherited.containsKey("LD_PRELOAD"));

@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  上游 ic_launcher.png 的背景是浅灰对角渐变,不是纯色:采样得左上 #f4f4f4、右下 #d7d7d7,
+  四角与边中点都落在这条对角线上。用 gradient 复刻,不必带位图。
+  angle=315 是 Android 的「从左上往右下」(0=从左往右,逆时针增加)。
+-->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#10251C" />
+    <gradient
+        android:angle="315"
+        android:endColor="#D7D7D7"
+        android:startColor="#F4F4F4"
+        android:type="linear" />
 </shape>

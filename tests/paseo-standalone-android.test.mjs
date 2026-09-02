@@ -186,9 +186,125 @@ test("Android runtime generation forces existing installs to receive standalone 
     "ZeroTermux-main/app/src/main/assets/paseo-runtime/runtime-version",
   );
 
-  assert.match(runtimeInstaller, /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-arm64-v8"/);
+  assert.match(
+    runtimeInstaller,
+    /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-npm-11\.16\.0-pnpm-11\.7\.0-eac-5\.3\.1-arm64-v10"/,
+  );
   assert.match(runtimeVersion, /paseo-enhanced-2\.3\.6-runtime-15/);
   assert.match(runtimeInstaller, /\[ -f "\$RUNTIME_OWNERSHIP" \]/u);
+});
+
+test("Android runtime bundles and atomically installs the EAC payload", async () => {
+  const installer = await source(
+    "ZeroTermux-main/app/src/main/assets/paseo-runtime/install-bundled-runtime.sh",
+  );
+  const assembler = await source("scripts/prepare-android-runtime.ps1");
+
+  assert.match(assembler, /eac-runtime-arm64\.tgz/u);
+  assert.match(assembler, /stage-eac-android-runtime\.mjs/u);
+  assert.match(assembler, /node_modules\/@img\/sharp-wasm32/u);
+  assert.match(assembler, /node_modules\/@emnapi\/runtime/u);
+  assert.match(assembler, /node_modules\/tslib/u);
+  assert.match(assembler, /koffi-android-arm64/u);
+  assert.match(assembler, /Deepseek\.Harness\.EAC_5\.3\.1_amd64\.deb/u);
+  assert.match(assembler, /1a72ba95042c26d06a19bc1128e674543df149fc8b47eb95e25ae708339757a1/u);
+  assert.match(assembler, /\$manifestLines[\s\S]*\$eacArchiveName/u);
+
+  assert.match(installer, /EAC_ARCHIVE="\$PACKAGES_DIR\/eac-runtime-arm64\.tgz"/u);
+  assert.match(installer, /EAC_ROOT="\$RUNTIME_DIR\/eac"/u);
+  assert.match(installer, /EAC_STAGING_ROOT="\$RUNTIME_DIR\/eac-payload\.staging"/u);
+  assert.match(installer, /EAC_STAGED_ROOT="\$EAC_STAGING_ROOT\/eac"/u);
+  assert.match(installer, /EAC_BACKUP="\$RUNTIME_DIR\/eac\.backup"/u);
+  assert.match(installer, /EAC_SHA_FILE="\$EAC_ROOT\/\.payload-sha256"/u);
+  assert.match(installer, /gzip -dc "\$EAC_ARCHIVE"[\s\S]*tar -xf - -C "\$EAC_STAGING_ROOT"/u);
+  for (const file of ["server.js", "bridge.js", "phone-bridge.js", "rescue-integration.js"]) {
+    const escaped = file.replace(".", "\\.");
+    assert.match(installer, new RegExp(`\\[ -f "\\$root/sidecar/${escaped}" \\]`, "u"));
+  }
+  assert.match(installer, /\[ -f "\$root\/dsh-desktop\/package\.json" \]/u);
+  assert.match(installer, /\[ -f "\$root\/dsh-desktop\/lib\/desktop\/boot-server\.js" \]/u);
+  assert.match(installer, /printf '%s\\n' "\$expected_sha" > "\$EAC_STAGED_ROOT\/\.payload-sha256\.tmp"/u);
+  assert.match(installer, /mv "\$EAC_STAGED_ROOT\/\.payload-sha256\.tmp" "\$EAC_STAGED_ROOT\/\.payload-sha256"/u);
+  assert.match(installer, /mv "\$EAC_ROOT" "\$EAC_BACKUP"/u);
+  assert.match(installer, /mv "\$EAC_STAGED_ROOT" "\$EAC_ROOT"/u);
+  assert.match(installer, /mv "\$EAC_BACKUP" "\$EAC_ROOT"/u);
+
+  const eacInstallIndex = installer.indexOf('install_eac_payload "$EAC_EXPECTED_SHA"');
+  const prefixFastPathIndex = installer.indexOf('cat "$MARKER"');
+  assert.ok(eacInstallIndex >= 0, "EAC install call must be present");
+  assert.ok(prefixFastPathIndex > eacInstallIndex,
+    "EAC freshness installation must run before the prefix fast-path can exit");
+});
+
+test("Android runtime bundles npm and pnpm with device wrappers", async () => {
+  const runtimeInstaller = await source(
+    "ZeroTermux-main/app/src/main/assets/paseo-runtime/install-bundled-runtime.sh",
+  );
+  const assembler = await source("scripts/prepare-android-runtime.ps1");
+  const runtimeProject = JSON.parse(await source("scripts/android-runtime/package.json"));
+
+  // Pinned through the lockfile, not copied from whatever Node the build host
+  // happens to have. npm 11.16.0 is the version Node 24.18.0 itself ships.
+  assert.equal(runtimeProject.dependencies.npm, "11.16.0");
+  assert.equal(runtimeProject.dependencies.pnpm, "11.7.0");
+
+  // Assembly must fail loudly if either entry point is absent from the payload.
+  assert.match(assembler, /node_modules\/npm\/bin\/npm-cli\.js/u);
+  assert.match(assembler, /node_modules\/pnpm\/bin\/pnpm\.cjs/u);
+  // pnpm vendors Windows-only fastlist helpers that the .exe/.dll guard rejects.
+  assert.match(assembler, /pnpm\\dist\\vendor/u);
+
+  // The wrappers cannot rely on a shebang lookup: Termux has no /usr/bin/env,
+  // so both exec the bundled node against an absolute entry-point path.
+  assert.match(
+    runtimeInstaller,
+    /exec "\$PREFIX\/bin\/node" "\$PREFIX\/lib\/node_modules\/npm\/bin\/npm-cli\.js" "\$@"/u,
+  );
+  assert.match(
+    runtimeInstaller,
+    /exec "\$PREFIX\/bin\/node" "\$PREFIX\/lib\/node_modules\/pnpm\/bin\/pnpm\.cjs" "\$@"/u,
+  );
+  // Owned paths, so a later install removes them instead of orphaning them.
+  assert.match(runtimeInstaller, /'bin\/paseo' 'bin\/codex' 'bin\/npm' 'bin\/pnpm'/u);
+  // The freshness gate must notice a runtime that is missing either tool.
+  assert.match(runtimeInstaller, /\[ -x "\$PREFIX\/bin\/npm" \]/u);
+  assert.match(runtimeInstaller, /\[ -x "\$PREFIX\/bin\/pnpm" \]/u);
+});
+
+test("runtime assembly pins tar and stays runnable without symlink privilege", async () => {
+  const assembler = await source("scripts/prepare-android-runtime.ps1");
+
+  // A bare `tar.exe` resolves through PATH. Launched from git-bash that finds GNU
+  // tar, which reads the `D:` of an absolute archive path as a remote host and
+  // aborts, so the tool is pinned to Windows' own bsdtar instead.
+  assert.match(assembler, /\$tar = Join-Path \$env:SystemRoot 'System32\\tar\.exe'/u);
+  assert.doesNotMatch(assembler, /& tar\.exe/u);
+
+  // Only the Node headers are wanted here. Unpacking the whole deb also unpacks
+  // bin/corepack, the payload's one symlink, which fails without
+  // SeCreateSymbolicLinkPrivilege and would take the entire run down with it.
+  assert.match(assembler, /include\/node"\r?\n/u);
+
+  // Staging the Termux archive needs those privileges, so an operator who lacks
+  // them can reuse the committed one, but only if it is actually there.
+  assert.match(assembler, /\[switch\]\$SkipTermuxRuntime/u);
+  assert.match(assembler, /-SkipTermuxRuntime needs the existing \$termuxArchiveName/u);
+
+  // Validation re-extracts that archive purely to scan file contents, and it skips
+  // reparse points, so symlinks it could not create cost it no coverage. Capturing
+  // native stderr needs the script-wide 'Stop' preference relaxed first, otherwise
+  // the first warning terminates the run before the exit code is read.
+  assert.match(assembler, /\$ErrorActionPreference = 'Continue'/u);
+  assert.match(assembler, /\$ErrorActionPreference = \$previousErrorAction/u);
+  assert.match(assembler, /Can't create '\.\+': Invalid argument/u);
+});
+
+test("runtime assembly replaces the manifest instead of truncating a file held by readers", async () => {
+  const assembler = await source("scripts/prepare-android-runtime.ps1");
+
+  assert.match(assembler, /\$manifestTemporary = "\$manifest\.tmp"/u);
+  assert.match(assembler, /WriteAllText\(\s*\$manifestTemporary,/u);
+  assert.match(assembler, /Move-Item -LiteralPath \$manifestTemporary -Destination \$manifest -Force/u);
 });
 
 test("Android build generates a constant-time runtime asset fingerprint", async () => {

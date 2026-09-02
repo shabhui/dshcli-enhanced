@@ -21,6 +21,38 @@ Project 组件通常按 Apache License 2.0 或其组件附带的许可发布；�
 Android SDK 源码。使用者在构建或再分发 Android 客户端时，应继续遵守本地 SDK
 和系统组件附带的通知。
 
+## DSHA Android launch shell
+
+- 项目：DSHA
+- 来源：<https://github.com/qiannianhuanxiang/DSHA>
+- 参考版本：41539fa2b45b4d1655f420df0c7dd1208b339c86
+- 复用范围：Android 启动控制页布局、状态交互结构和有界日志尾读算法；Paseo
+  使用自己的 EAC sidecar/runtime 后端，不包含 DSHA 的 proot、GeckoView、ADB
+  或前台服务实现。
+- 许可：MIT License
+
+    MIT License
+
+    Copyright (c) 2026 qiannianhuanxiang
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
 ## Node.js 与 npm 依赖
 
 安装器不会把 Node.js、`@getpaseo/cli` 或其全部依赖复制进本仓库，而是要求使用者
@@ -39,4 +71,3 @@ Android 图标来自当前 Paseo 增强客户端构建所使用的 Paseo 图标�
 本仓库新增的安装器、管理面板、状态同步、Provider 扫描超时和 Android 键盘
 避让代码，均以与上游兼容的 AGPLv3 条件发布。重新分发修改版时，请保留本文件、
 `NOTICE.md`、`LICENSE` 和上游版权信息，并按 AGPLv3 提供对应源代码。
-

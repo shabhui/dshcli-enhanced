@@ -27,9 +27,9 @@ SHA-256：
 `v2.3.2` 修复 Windows 构建生成 CRLF runtime manifest 时，首次安装错误提示缺少
 `termux-node-runtime-arm64.tgz` 的问题。
 
-应用包名为 `com.paseoe`，可以直接与原来的 `com.termux` ZeroTermux 共存，不会覆盖
+应用包名为 `com.dshcli`，可以直接与原来的 `com.termux` ZeroTermux 共存，不会覆盖
 原应用。Java namespace 仍为 `com.termux`，bootstrap 和内置 Node 运行时已迁移到
-`/data/data/com.paseoe/files/usr`；启动时直接解包已校验的运行时归档，不依赖原应用的
+`/data/data/com.dshcli/files/usr`；启动时直接解包已校验的运行时归档，不依赖原应用的
 dpkg 状态。
 
 ## 构建

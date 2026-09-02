@@ -1,4 +1,4 @@
-#!/data/data/com.paseoe/files/usr/bin/bash
+#!/data/data/com.dshcli/files/usr/bin/bash
 am broadcast --user 0 \
-		 --es com.paseoe.app.reload_style left \
-		 -a com.paseoe.app.reload_style com.paseoe > /dev/null
+		 --es com.dshcli.app.reload_style left \
+		 -a com.dshcli.app.reload_style com.dshcli > /dev/null

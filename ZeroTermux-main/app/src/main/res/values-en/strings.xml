@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <!DOCTYPE resources [
-    <!ENTITY TERMUX_PACKAGE_NAME "com.paseoe">
+    <!ENTITY TERMUX_PACKAGE_NAME "com.dshcli">
     <!ENTITY TERMUX_APP_NAME "Termux">
     <!ENTITY TERMUX_API_APP_NAME "Termux:API">
     <!ENTITY TERMUX_BOOT_APP_NAME "Termux:Boot">
@@ -16,7 +16,7 @@
     <string name="application_name">&TERMUX_APP_NAME;</string>
     <string name="shared_user_label">ZeroTermux user</string>
 
-    <string name="app_name">Paseo Enhanced</string>
+    <string name="app_name">DSHA</string>
 
     <!-- Termux RUN_COMMAND permission -->
     <string name="permission_run_command_label">Run commands in &TERMUX_APP_NAME; environment</string>
@@ -1404,8 +1404,8 @@ Known Issue: Rapid consecutive back operations may cause black screen in Interna
         ln[ \n
         Description: current directory internal storage path \n
         Note: Both paths must be absolute paths \n
-        Example: ln /data/data/com.paseoe/files/home/custom_name /sdcard/ \n
-        Example (or specify a directory): ln /data/data/com.paseoe/files/home/custom_name /sdcard/custom_directory/ \n
+        Example: ln /data/data/com.dshcli/files/home/custom_name /sdcard/ \n
+        Example (or specify a directory): ln /data/data/com.dshcli/files/home/custom_name /sdcard/custom_directory/ \n
         ] \n
         --------Version 0.2 Update--------\n
         zt dialog \n
@@ -1421,8 +1421,8 @@ Known Issue: Rapid consecutive back operations may cause black screen in Interna
         zt backgroundimage(bgi) Image path (set as current terminal background)\n
         backgroundimage(bgi)[\n
         Usage Help (full path required):\n
-        zt backgroundimage /data/data/com.paseoe/files/home/.img/back.jpg \n
-        zt bgi /data/data/com.paseoe/files/home/.img/back.jpg \n
+        zt backgroundimage /data/data/com.dshcli/files/home/.img/back.jpg \n
+        zt bgi /data/data/com.dshcli/files/home/.img/back.jpg \n
         ]\n
         \n
         zt qr Open Scan (scan QR code or barcode)\n

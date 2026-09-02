@@ -20,7 +20,7 @@ public class PaseoHomeTest {
 
     @Test
     public void resolvesTheUnifiedTermuxHome() {
-        File filesDirectory = new File("/data/user/0/com.paseoe/files");
+        File filesDirectory = new File("/data/user/0/com.dshcli/files");
 
         // "home" is what TermuxConstants.TERMUX_HOME_DIR_PATH resolves to, so a Termux
         // session and the Paseo daemon land in the same directory.
@@ -85,6 +85,43 @@ public class PaseoHomeTest {
         PaseoHome.migrateLegacyHome(filesDirectory);
 
         assertEquals("keep me", read(new File(unified, "notes.txt")));
+    }
+
+    @Test
+    public void rewritesLegacyHomePathsRecordedInsideMigratedState() throws IOException {
+        File filesDirectory = temporaryFolder.newFolder("files");
+        File legacyAgents = new File(filesDirectory, "paseo-home/.paseo-app/agents");
+        assertTrue(legacyAgents.mkdirs());
+        File legacyRoot = new File(filesDirectory, "paseo-home");
+        String recorded = launcherPath(legacyRoot);
+        write(new File(legacyAgents, "agent-cli-state.json"),
+            "{\"pi\":{\"installed\":true,\"entryPath\":\"" + recorded + "\"}}");
+
+        assertTrue(PaseoHome.migrateLegacyHome(filesDirectory).isEmpty());
+
+        String state = read(new File(filesDirectory, "home/.paseo-app/agents/agent-cli-state.json"));
+        assertFalse("the dead legacy prefix must not survive the migration",
+            state.contains(legacyRoot.getAbsolutePath() + File.separator));
+        assertTrue("paths must point at the unified home",
+            state.contains(launcherPath(new File(filesDirectory, "home"))));
+    }
+
+    /** An installed CLI path as the Agent CLI state records it: absolute, rooted at {@code $HOME}. */
+    private static String launcherPath(File home) {
+        return new File(home, ".paseo-app/agents/packages/pi/paseo-cli").getAbsolutePath();
+    }
+
+    @Test
+    public void leavesMigratedStateAloneWhenItCarriesNoLegacyPaths() throws IOException {
+        File filesDirectory = temporaryFolder.newFolder("files");
+        File legacyAgents = new File(filesDirectory, "paseo-home/.paseo-app/agents");
+        assertTrue(legacyAgents.mkdirs());
+        write(new File(legacyAgents, "agent-cli-state.json"), "{\"codex\":{\"installed\":true}}");
+
+        assertTrue(PaseoHome.migrateLegacyHome(filesDirectory).isEmpty());
+
+        assertEquals("{\"codex\":{\"installed\":true}}",
+            read(new File(filesDirectory, "home/.paseo-app/agents/agent-cli-state.json")));
     }
 
     private static void write(File file, String contents) throws IOException {

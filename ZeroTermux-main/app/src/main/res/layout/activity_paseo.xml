@@ -1,81 +1,252 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launch control structure adapted from DSHA fragment_launch.xml.
+  DSHA is MIT licensed; attribution is retained in THIRD_PARTY_NOTICES.md.
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/paseo_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#101514">
+    android:background="@color/paseo_dsha_surface">
 
     <LinearLayout
-        android:id="@+id/paseo_startup_panel"
+        android:id="@+id/launch_home"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:gravity="center"
         android:orientation="vertical"
-        android:padding="28dp">
-
-        <TextView
-            android:id="@+id/paseo_brand"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Paseo"
-            android:textColor="#F1F5F3"
-            android:textSize="34sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/paseo_subtitle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="Enhanced"
-            android:textColor="#75D1AA"
-            android:textSize="16sp" />
-
-        <ProgressBar
-            android:id="@+id/paseo_progress"
-            style="?android:attr/progressBarStyleLarge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="44dp"
-            android:indeterminateTint="#75D1AA" />
-
-        <TextView
-            android:id="@+id/paseo_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:gravity="center"
-            android:text="@string/paseo_status_preparing_terminal"
-            android:textColor="#C7D2CE"
-            android:textSize="15sp" />
+        android:paddingStart="@dimen/paseo_dsha_page_pad"
+        android:paddingTop="@dimen/paseo_dsha_gap_tight"
+        android:paddingEnd="@dimen/paseo_dsha_page_pad"
+        android:paddingBottom="@dimen/paseo_dsha_gap_control">
 
         <LinearLayout
-            android:id="@+id/paseo_actions"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="28dp"
-            android:orientation="horizontal"
-            android:visibility="gone">
+            style="@style/DshaCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
 
-            <Button
-                android:id="@+id/paseo_retry"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/paseo_action_retry" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <Button
-                android:id="@+id/paseo_terminal"
-                android:layout_width="wrap_content"
+                <TextView
+                    android:id="@+id/launch_run_dot"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="●"
+                    android:textColor="@color/paseo_dsha_text_muted"
+                    android:textSize="@dimen/paseo_dsha_text_caption" />
+
+                <TextView
+                    android:id="@+id/launch_run_state"
+                    style="@style/DshaText.Title"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/paseo_dsha_gap_tight"
+                    android:layout_weight="1"
+                    android:text="@string/paseo_state_preparing" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/launch_status"
+                style="@style/DshaText.Label"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:text="@string/paseo_action_open_terminal" />
+                android:layout_marginTop="@dimen/paseo_dsha_gap_tight"
+                android:text="@string/paseo_status_preparing_terminal"
+                android:textColor="@color/paseo_dsha_text_muted" />
+
+            <ProgressBar
+                android:id="@+id/launch_busy"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/paseo_dsha_progress_thin"
+                android:layout_marginTop="@dimen/paseo_dsha_gap_tight"
+                android:indeterminate="true"
+                android:indeterminateTint="@color/paseo_dsha_primary" />
+
+            <LinearLayout
+                android:id="@+id/launch_controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/paseo_dsha_gap_control"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/launch_start"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_btn_height"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn_primary"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_start"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_accent_on"
+                    android:textSize="@dimen/paseo_dsha_text_body" />
+
+                <Button
+                    android:id="@+id/launch_open"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_btn_height"
+                    android:layout_marginStart="@dimen/paseo_dsha_gap_tight"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_restart"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_text_secondary"
+                    android:textSize="@dimen/paseo_dsha_text_body" />
+
+                <Button
+                    android:id="@+id/launch_stop"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_btn_height"
+                    android:layout_marginStart="@dimen/paseo_dsha_gap_tight"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_stop"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_err"
+                    android:textSize="@dimen/paseo_dsha_text_body" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/lan_addr"
+                style="@style/DshaText.Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/paseo_dsha_gap_control"
+                android:background="@drawable/paseo_dsha_bg_chip_clickable"
+                android:clickable="true"
+                android:focusable="true"
+                android:fontFamily="monospace"
+                android:paddingStart="@dimen/paseo_dsha_gap_control"
+                android:paddingTop="10dp"
+                android:paddingEnd="@dimen/paseo_dsha_gap_control"
+                android:paddingBottom="10dp"
+                android:textColor="@color/paseo_dsha_primary"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/paseo_dsha_gap_tight"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/paseo_port"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_touch_min"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_port"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_text_secondary"
+                    android:textSize="@dimen/paseo_dsha_text_caption" />
+
+                <Button
+                    android:id="@+id/paseo_terminal"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_touch_min"
+                    android:layout_marginStart="@dimen/paseo_dsha_gap_tight"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_open_terminal"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_text_secondary"
+                    android:textSize="@dimen/paseo_dsha_text_caption" />
+
+                <Button
+                    android:id="@+id/paseo_refresh_log"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/paseo_dsha_touch_min"
+                    android:layout_marginStart="@dimen/paseo_dsha_gap_tight"
+                    android:layout_weight="1"
+                    android:background="@drawable/paseo_dsha_bg_btn"
+                    android:backgroundTint="@null"
+                    android:text="@string/paseo_action_refresh_log"
+                    android:textAllCaps="false"
+                    android:textColor="@color/paseo_dsha_text_secondary"
+                    android:textSize="@dimen/paseo_dsha_text_caption" />
+            </LinearLayout>
+
+            <!--
+              「连接电脑」自成一行:它切换的是「看哪台机器」,和上一排的本机运维操作
+              (端口/终端/日志)不是同一类;412px 上四个按钮并排也已经放不下文字。
+            -->
+            <Button
+                android:id="@+id/paseo_connect_computer"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/paseo_dsha_touch_min"
+                android:layout_marginTop="@dimen/paseo_dsha_gap_tight"
+                android:background="@drawable/paseo_dsha_bg_btn"
+                android:backgroundTint="@null"
+                android:text="@string/paseo_action_connect_computer"
+                android:textAllCaps="false"
+                android:textColor="@color/paseo_dsha_text_secondary"
+                android:textSize="@dimen/paseo_dsha_text_caption" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="@dimen/paseo_dsha_gap_control"
+            android:layout_weight="1"
+            android:background="@drawable/paseo_dsha_bg_preview"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/DshaText.Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="@dimen/paseo_dsha_card_pad"
+                android:paddingTop="@dimen/paseo_dsha_gap_control"
+                android:paddingEnd="@dimen/paseo_dsha_card_pad"
+                android:paddingBottom="@dimen/paseo_dsha_gap_hair"
+                android:text="@string/paseo_log_title" />
+
+            <ScrollView
+                android:id="@+id/launch_log_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:fillViewport="true">
+
+                <TextView
+                    android:id="@+id/launch_log"
+                    style="@style/DshaText.Caption"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:paddingStart="@dimen/paseo_dsha_card_pad"
+                    android:paddingTop="@dimen/paseo_dsha_gap_hair"
+                    android:paddingEnd="@dimen/paseo_dsha_card_pad"
+                    android:paddingBottom="@dimen/paseo_dsha_card_pad"
+                    android:text="@string/paseo_logs_empty"
+                    android:textColor="@color/paseo_dsha_text_secondary"
+                    android:textIsSelectable="true" />
+            </ScrollView>
         </LinearLayout>
     </LinearLayout>
 
-    <WebView
-        android:id="@+id/paseo_webview"
+    <FrameLayout
+        android:id="@+id/launch_web"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:visibility="gone" />
+        android:background="@color/paseo_dsha_surface"
+        android:visibility="gone">
+
+        <WebView
+            android:id="@+id/paseo_webview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+    </FrameLayout>
 
 </FrameLayout>

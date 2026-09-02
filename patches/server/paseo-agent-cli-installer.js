@@ -330,15 +330,69 @@ export function agentCliInstallRoot(paseoHome) {
     return path.join(normalizeHome(paseoHome), "agents");
 }
 
+// Absolute paths recorded inside the state file survive a $HOME move untouched, so every consumer
+// validates them against an install root computed from the *new* home and rejects them. Re-root the
+// two unambiguous layouts we own -- <root>/packages/<id>/... and <root>/bin/<id> -- onto the current
+// root. Anything else (a $PREFIX node binary, a user-supplied command) is left exactly as stored.
+const STATE_PATH_ANCHOR_DIRECTORIES = new Set(["packages", "bin"]);
+const STATE_PATH_FIELDS = ["entryPath", "launcher"];
+
+function rerootStatePath(value, installRoot) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    const segments = value.split(/[\\/]+/u).filter((segment) => segment.length > 0);
+    const rootName = path.basename(installRoot);
+    let anchor = -1;
+    for (let index = segments.length - 2; index >= 0; index -= 1) {
+        if (segments[index] === rootName && STATE_PATH_ANCHOR_DIRECTORIES.has(segments[index + 1])) {
+            anchor = index;
+            break;
+        }
+    }
+    if (anchor < 0) return null;
+    const rerooted = path.join(installRoot, ...segments.slice(anchor + 1));
+    return rerooted === path.resolve(value) ? null : rerooted;
+}
+
+export function rerootAgentStatePaths(state, installRoot) {
+    if (!state || typeof state !== "object" || Array.isArray(state)) return false;
+    if (typeof installRoot !== "string" || !installRoot.trim()) return false;
+    const root = path.resolve(installRoot);
+    let changed = false;
+    for (const entry of Object.values(state)) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+        for (const field of STATE_PATH_FIELDS) {
+            const rerooted = rerootStatePath(entry[field], root);
+            if (rerooted === null) continue;
+            entry[field] = rerooted;
+            changed = true;
+        }
+        if (!Array.isArray(entry.command)) continue;
+        entry.command = entry.command.map((value) => {
+            const rerooted = rerootStatePath(value, root);
+            if (rerooted === null) return value;
+            changed = true;
+            return rerooted;
+        });
+    }
+    return changed;
+}
+
 async function readState(paseoHome) {
+    let parsed;
     try {
         const raw = await fs.readFile(path.join(agentCliInstallRoot(paseoHome), STATE_FILE), "utf8");
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+        parsed = JSON.parse(raw);
     }
     catch {
         return {};
     }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    // Self-heal in place: installs that already migrated will never run the migration again, so the
+    // repair has to happen on read rather than during the move.
+    if (rerootAgentStatePaths(parsed, agentCliInstallRoot(paseoHome))) {
+        await writeState(paseoHome, parsed).catch(() => undefined);
+    }
+    return parsed;
 }
 
 async function writeState(paseoHome, state) {

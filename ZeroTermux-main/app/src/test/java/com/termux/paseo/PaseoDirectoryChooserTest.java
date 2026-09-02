@@ -59,20 +59,20 @@ public class PaseoDirectoryChooserTest {
     @Test
     public void mapsPaseoPrivateHomeDocumentUrisToLocalPaths() {
         Uri root = Uri.parse(
-            "content://com.paseoe.documents/tree/%2Fdata%2Fdata%2Fcom.paseoe%2Ffiles%2Fhome");
+            "content://com.dshcli.documents/tree/%2Fdata%2Fdata%2Fcom.dshcli%2Ffiles%2Fhome");
         Uri project = Uri.parse(
-            "content://com.paseoe.documents/tree/%2Fdata%2Fdata%2Fcom.paseoe%2Ffiles%2Fhome%2Fproject");
+            "content://com.dshcli.documents/tree/%2Fdata%2Fdata%2Fcom.dshcli%2Ffiles%2Fhome%2Fproject");
 
-        assertEquals("/data/data/com.paseoe/files/home", PaseoDirectoryChooser.toFilesystemPath(root));
-        assertEquals("/data/data/com.paseoe/files/home/project", PaseoDirectoryChooser.toFilesystemPath(project));
+        assertEquals("/data/data/com.dshcli/files/home", PaseoDirectoryChooser.toFilesystemPath(root));
+        assertEquals("/data/data/com.dshcli/files/home/project", PaseoDirectoryChooser.toFilesystemPath(project));
     }
 
     @Test
     public void rejectsPaseoProviderUrisOutsideItsPrivateHome() {
         assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse(
-            "content://com.paseoe.documents/tree/%2Fdata%2Fdata%2Fcom.paseoe%2Ffiles%2Fusr")));
+            "content://com.dshcli.documents/tree/%2Fdata%2Fdata%2Fcom.dshcli%2Ffiles%2Fusr")));
         assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse(
-            "content://com.paseoe.documents/tree/%2Fdata%2Fdata%2Fcom.paseoe%2Ffiles%2Fhome%2F..%2Fusr")));
+            "content://com.dshcli.documents/tree/%2Fdata%2Fdata%2Fcom.dshcli%2Ffiles%2Fhome%2F..%2Fusr")));
     }
 
     @Test
@@ -113,7 +113,7 @@ public class PaseoDirectoryChooserTest {
 
     @Test
     public void rejectsUnsafeFileUris() {
-        assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse("file:///data/user/0/com.paseoe/files")));
+        assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse("file:///data/user/0/com.dshcli/files")));
         assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse("file:///storage/emulated/0/Projects/../Secrets")));
         assertNull(PaseoDirectoryChooser.toFilesystemPath(Uri.parse("file://remote/storage/emulated/0/Projects")));
     }

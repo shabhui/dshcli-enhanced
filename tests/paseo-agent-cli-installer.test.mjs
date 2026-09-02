@@ -11,6 +11,7 @@ import {
   installAgentCli,
   agentCliInstallRoot,
   packageManagerEnvironment,
+  rerootAgentStatePaths,
   updateAgentCli,
 } from "../patches/server/paseo-agent-cli-installer.js";
 
@@ -947,13 +948,13 @@ test("package installs build PATH with the host delimiter and platform directori
     pathDelimiter: ":",
     inheritedPath: "/ignored/untrusted/path",
     paseoHome: path.join(home, ".paseo"),
-  }, path.join(home, ".paseo"), "/data/data/com.paseoe/files/usr");
-  assert.equal(android.PATH, "/data/data/com.paseoe/files/usr/bin:/system/bin:/system/xbin");
+  }, path.join(home, ".paseo"), "/data/data/com.dshcli/files/usr");
+  assert.equal(android.PATH, "/data/data/com.dshcli/files/usr/bin:/system/bin:/system/xbin");
   assert.equal(android.HOME, home);
-  assert.equal(android.PREFIX, "/data/data/com.paseoe/files/usr");
-  assert.equal(android.TERMUX_PREFIX, "/data/data/com.paseoe/files/usr");
+  assert.equal(android.PREFIX, "/data/data/com.dshcli/files/usr");
+  assert.equal(android.TERMUX_PREFIX, "/data/data/com.dshcli/files/usr");
   assert.equal(android.TERMUX_HOME, home);
-  assert.equal(android.DPKG_ADMINDIR, "/data/data/com.paseoe/files/usr/var/lib/dpkg");
+  assert.equal(android.DPKG_ADMINDIR, "/data/data/com.dshcli/files/usr/var/lib/dpkg");
 });
 
 test("bundled Paseo CLI can be installed into the App-private directory", async () => {
@@ -1188,4 +1189,95 @@ test("forcing a custom npm install applies a replacement definition with the sam
   assert.deepEqual(calls, ["replaceable-agent@1.0.0", "replaceable-agent@2.0.0"]);
   assert.equal(reinstalled.version, "2.0.0");
   assert.match(await readFile(path.join(agentCliInstallRoot(home), "packages", "replaceable-agent", "node_modules", "replaceable-agent", "bin", "agent.js"), "utf8"), /2\.0\.0/u);
+});
+
+test("state paths recorded under a previous home are re-rooted onto the current install root", () => {
+  const deviceFiles = path.resolve(path.sep, "data", "data", "com.termux", "files");
+  const oldRoot = path.join(deviceFiles, "paseo-home", ".paseo-app", "agents");
+  const newRoot = path.join(deviceFiles, "home", ".paseo-app", "agents");
+  const nodeCommand = path.join(deviceFiles, "usr", "bin", "node");
+  const state = {
+    pi: {
+      installed: true,
+      command: [path.join(oldRoot, "packages", "pi", "paseo-cli")],
+      entryPath: path.join(oldRoot, "packages", "pi", "node_modules", ".bin", "pi"),
+      launcher: path.join(oldRoot, "packages", "pi", "paseo-cli"),
+      nodeCommand,
+    },
+  };
+
+  const changed = rerootAgentStatePaths(state, newRoot);
+
+  assert.equal(changed, true);
+  assert.deepEqual(state.pi.command, [path.join(newRoot, "packages", "pi", "paseo-cli")]);
+  assert.equal(state.pi.entryPath, path.join(newRoot, "packages", "pi", "node_modules", ".bin", "pi"));
+  assert.equal(state.pi.launcher, path.join(newRoot, "packages", "pi", "paseo-cli"));
+  // nodeCommand lives under $PREFIX, not $HOME, so the move never invalidated it.
+  assert.equal(state.pi.nodeCommand, nodeCommand);
+});
+
+test("re-rooting leaves healthy state untouched and reports no change", () => {
+  const root = path.resolve(path.sep, "srv", "home", ".paseo-app", "agents");
+  const state = {
+    pi: {
+      installed: true,
+      command: [path.join(root, "bin", "pi")],
+      entryPath: path.join(root, "packages", "pi", "node_modules", ".bin", "pi"),
+    },
+  };
+  const snapshot = structuredClone(state);
+
+  assert.equal(rerootAgentStatePaths(state, root), false);
+  assert.deepEqual(state, snapshot);
+});
+
+test("re-rooting only rewrites paths that carry an agents anchor", () => {
+  const root = path.resolve(path.sep, "new", "agents");
+  const state = {
+    pi: {
+      command: [path.join(path.sep, "usr", "local", "bin", "pi"), "--flag"],
+      entryPath: 42,
+    },
+  };
+
+  assert.equal(rerootAgentStatePaths(state, root), false);
+  assert.deepEqual(state.pi.command, [path.join(path.sep, "usr", "local", "bin", "pi"), "--flag"]);
+  assert.equal(state.pi.entryPath, 42);
+});
+
+test("an npm CLI installed under the previous home still reports installed after the home moved", async () => {
+  const oldHome = await tempHome();
+  const newHome = await tempHome();
+  const oldRoot = agentCliInstallRoot(oldHome);
+  const newRoot = agentCliInstallRoot(newHome);
+  // The home migration moved the files but left the absolute paths inside the state file behind.
+  const packageRoot = path.join(newRoot, "packages", "claude", "node_modules", "@bash0816", "claude-code");
+  await mkdir(path.join(packageRoot, "bin"), { recursive: true });
+  await writeFile(path.join(packageRoot, "package.json"), JSON.stringify({
+    name: "@bash0816/claude-code",
+    version: "2.1.237",
+    bin: { claude: "bin/claude" },
+  }));
+  await writeFile(path.join(packageRoot, "bin", "claude"), "#!/usr/bin/env sh\nexit 0\n", { mode: 0o755 });
+  const stalePackageRoot = path.join(oldRoot, "packages", "claude", "node_modules", "@bash0816", "claude-code");
+  await writeFile(path.join(newRoot, "agent-cli-state.json"), JSON.stringify({
+    claude: {
+      installed: true,
+      version: "2.1.237",
+      package: "@bash0816/claude-code@2.1.237",
+      entryPath: path.join(stalePackageRoot, "bin", "claude"),
+      launcher: path.join(oldRoot, "packages", "claude", "paseo-cli"),
+      command: [path.join(oldRoot, "packages", "claude", "paseo-cli")],
+      state: "installed",
+    },
+  }));
+
+  const catalog = await listAgentCliCatalog({ paseoHome: newHome, platform: "android", cliSourceRoot: path.join(newHome, "usr") });
+  const claude = catalog.find((entry) => entry.providerId === "claude");
+
+  assert.ok(claude);
+  assert.equal(claude.installed, true, "a moved home must not present an installed CLI as missing");
+  const persisted = JSON.parse(await readFile(path.join(newRoot, "agent-cli-state.json"), "utf8"));
+  assert.equal(persisted.claude.entryPath.startsWith(newRoot), true);
+  assert.equal(persisted.claude.launcher.startsWith(newRoot), true);
 });

@@ -1,5 +1,9 @@
 param(
     [switch]$ValidateOnly,
+    # Reuse the committed Termux runtime archive instead of rebuilding it. Staging
+    # it needs to create symlinks, which on Windows requires an elevated shell or
+    # Developer Mode. Only safe while the pinned deb list below is unchanged.
+    [switch]$SkipTermuxRuntime,
     [string]$AndroidSdkRoot = $env:ANDROID_SDK_ROOT
 )
 
@@ -12,12 +16,41 @@ $paseoArchiveName = 'paseo-node-modules-arm64.tgz'
 $paseoArchive = Join-Path $assets $paseoArchiveName
 $termuxArchiveName = 'termux-node-runtime-arm64.tgz'
 $termuxArchive = Join-Path $assets $termuxArchiveName
+$eacArchiveName = 'eac-runtime-arm64.tgz'
+$eacArchive = Join-Path $assets $eacArchiveName
+$eacVersion = '5.3.1'
+$eacDebName = 'Deepseek.Harness.EAC_5.3.1_amd64.deb'
+$eacDebUrl = 'https://github.com/zouyuxuan122/DSH-Desktop-EAC/releases/download/v5.3.1/Deepseek.Harness.EAC_5.3.1_amd64.deb'
+$eacDebSha256 = '1a72ba95042c26d06a19bc1128e674543df149fc8b47eb95e25ae708339757a1'
+$eacStageScript = Join-Path $PSScriptRoot 'stage-eac-android-runtime.mjs'
+$eacOverlayRoot = Join-Path $PSScriptRoot 'eac-android-overlay'
+$eacOverlayHashes = @{
+    'platform.js' = '3418ec87be338f3d308e6ddb782685cd48c3b9208c60028348beae3525082a5f'
+    'runtime-paths.js' = '39878c97b96e78be45cf8fcac351379d7186119eef9defac99d4fc072010ef9e'
+    'boot-server.js' = 'aa68714af6e2f69e18ca1d1ee0969036bbd75169e6cff52bce1d98c365897ba4'
+    'credentials-version.cjs' = '014436b318088759b04776a6060499f226e3fcaa9c54d170f2a3f765b8bd6bfd'
+    'android-resolve-sync.mjs' = '6003c183975b40d88364821610d30023c80087cffe9429fa4531bfd00d2b08c5'
+    'resolve-sync-plan.mjs' = '96bad72d9c8a70b340a071e72e08b8de5ee4230809452e6f797c497fd5c46b79'
+    'android-fs-patch.mjs' = 'a73c36f7ebe26300d5036c039c7a85f866f5dd0d2d1a783640912550d247be80'
+    'android-hardlink.mjs' = '3ce401fba1849661ebfcb6d86962b181c29ba6026b30e17de86aca8ec6049763'
+}
 $legacyArchive = Join-Path $assets 'paseo-node-modules-arm64.tar.gz'
 $legacyDebDirectory = Join-Path $assets 'deb'
 $npmProject = Join-Path $PSScriptRoot 'android-runtime'
 $ndkVersion = '29.0.14206865'
+# Pin Windows' own bsdtar. A bare `tar.exe` resolves through PATH, and when this
+# script is launched from git-bash it finds GNU tar instead, which reads the
+# `D:` in an absolute archive path as a remote host and dies with
+# "Cannot connect to D: resolve failed". bsdtar also handles the ustar/xz deb
+# payloads this script unpacks.
+$tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+if (!(Test-Path -LiteralPath $tar)) {
+    throw "Windows bsdtar not found at $tar"
+}
+$gitTar = Join-Path $env:ProgramFiles 'Git\usr\bin\tar.exe'
+$eacLocalCache = 'D:\cache\eac-linux\eac-5.3.1-amd64.deb'
 $legacyPackageName = 'com.termux'
-$standalonePackageName = 'com.paseoe'
+$standalonePackageName = 'com.dshcli'
 $latin1 = [System.Text.Encoding]::GetEncoding(28591)
 
 if ($latin1.GetByteCount($legacyPackageName) -ne $latin1.GetByteCount($standalonePackageName)) {
@@ -95,6 +128,38 @@ function Get-LockPackage([string]$LockFile, [string]$PackagePath) {
     }
 }
 
+function Stage-NpmPackageFromLock(
+    [string]$LockFile,
+    [string]$PackagePath,
+    [string]$DownloadDirectory,
+    [string]$Destination
+) {
+    $entry = Get-LockPackage $LockFile $PackagePath
+    $archiveName = (($PackagePath -replace '^node_modules/', '') -replace '[/@]', '-') + '.tgz'
+    $archive = Join-Path $DownloadDirectory $archiveName
+    Invoke-WebRequest -UseBasicParsing -Uri $entry.resolved -OutFile $archive
+    if ((Get-Sha512Integrity $archive) -ne $entry.integrity) {
+        throw "Downloaded npm package failed integrity verification: $PackagePath"
+    }
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    & $tar -xzf $archive --strip-components 1 -C $Destination
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to extract npm package: $PackagePath"
+    }
+}
+
+function Get-ArchiveJson([string]$Archive, [string]$Entry) {
+    $json = (& $tar -xOf $Archive $Entry) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+        throw "Unable to read archive entry: $Entry"
+    }
+    try {
+        return $json | ConvertFrom-Json
+    } catch {
+        throw "Invalid JSON in archive entry: $Entry"
+    }
+}
+
 function Stage-CodexAndroidPackage(
     [string]$LockFile,
     [string]$DestinationRoot,
@@ -115,7 +180,7 @@ function Stage-CodexAndroidPackage(
 
     $packageDirectory = Join-Path $DestinationRoot ($packagePath -replace '/', '\')
     New-Item -ItemType Directory -Force -Path $packageDirectory | Out-Null
-    & tar.exe -xzf $archive --strip-components 1 -C $packageDirectory
+    & $tar -xzf $archive --strip-components 1 -C $packageDirectory
     if ($LASTEXITCODE -ne 0) {
         throw 'Unable to extract the Codex Android package'
     }
@@ -218,8 +283,11 @@ function Assert-RuntimePayload {
     if (!$records.ContainsKey($paseoArchiveName)) {
         throw "Runtime manifest entry is missing: $paseoArchiveName"
     }
+    if (!$records.ContainsKey($eacArchiveName)) {
+        throw "Runtime manifest entry is missing: $eacArchiveName"
+    }
 
-    $termuxEntries = & tar.exe -tzf $termuxArchive
+    $termuxEntries = & $tar -tzf $termuxArchive
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to inspect $termuxArchiveName"
     }
@@ -271,9 +339,29 @@ function Assert-RuntimePayload {
     $validationRoot = Join-Path ([System.IO.Path]::GetTempPath()) "paseo-runtime-validation-$PID-$([guid]::NewGuid().ToString('N'))"
     try {
         New-Item -ItemType Directory -Path $validationRoot | Out-Null
-        & tar.exe -xzf $termuxArchive -C $validationRoot
+        # Redirecting a native command's stderr into the success stream raises
+        # NativeCommandError per line, which the script-wide 'Stop' preference would
+        # turn into a terminating error before the exit code can be inspected.
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $extractErrors = & $tar -xzf $termuxArchive -C $validationRoot 2>&1
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
         if ($LASTEXITCODE -ne 0) {
-            throw "Unable to extract $termuxArchiveName for validation"
+            # Without SeCreateSymbolicLinkPrivilege bsdtar cannot materialise the
+            # archive's symlinks, but it still writes every regular file and only
+            # then exits nonzero. Assert-NoLegacyPackageName skips reparse points,
+            # so such a run still scans every byte this check reads. Any other
+            # failure means the archive really is unusable.
+            $unexpected = $extractErrors | Where-Object {
+                "$_" -notmatch "Can't create '.+': Invalid argument" -and
+                    "$_" -notmatch 'Error exit delayed from previous errors'
+            }
+            if ($unexpected) {
+                throw "Unable to extract $termuxArchiveName for validation: $($unexpected[0])"
+            }
         }
         Assert-NoLegacyPackageName $validationRoot
     } finally {
@@ -287,7 +375,7 @@ function Assert-RuntimePayload {
         }
     }
 
-    $paseoEntries = & tar.exe -tzf $paseoArchive
+    $paseoEntries = & $tar -tzf $paseoArchive
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to inspect $paseoArchiveName"
     }
@@ -309,6 +397,17 @@ function Assert-RuntimePayload {
     if ($paseoEntries -notcontains 'node_modules/@parcel/watcher-android-arm64/watcher.node') {
         throw 'Bundled Android file watcher is missing'
     }
+    # The Termux Node payload ships corepack but no npm, and corepack would go
+    # to the network for pnpm. Both package managers are therefore vendored:
+    # npm is mandatory (the kernel's plugin installs shell out to it), pnpm is
+    # what `dsh plugin` forwards to. Assert the exact entry points the device
+    # wrappers exec, so a bad assembly fails here instead of on the phone.
+    if ($paseoEntries -notcontains 'node_modules/npm/bin/npm-cli.js') {
+        throw 'Bundled npm is missing from the Paseo runtime payload'
+    }
+    if ($paseoEntries -notcontains 'node_modules/pnpm/bin/pnpm.cjs') {
+        throw 'Bundled pnpm is missing from the Paseo runtime payload'
+    }
     $sourceMaps = $paseoEntries | Where-Object { $_ -match '\.map$' }
     if ($sourceMaps) {
         throw "Source map is bundled in Paseo runtime: $($sourceMaps[0])"
@@ -324,6 +423,91 @@ function Assert-RuntimePayload {
     if ($forbidden) {
         throw "Non-Android runtime payload is bundled: $($forbidden[0])"
     }
+    $allowedPaseoNative = @(
+        'node_modules/node-pty/prebuilds/android-arm64/pty.node',
+        'node_modules/@parcel/watcher-android-arm64/watcher.node'
+    )
+    $unexpectedPaseoNative = $paseoEntries | Where-Object {
+        $_ -match '\.node$' -and $allowedPaseoNative -notcontains $_
+    }
+    if ($unexpectedPaseoNative) {
+        throw "Unexpected native module is bundled in Paseo runtime: $($unexpectedPaseoNative[0])"
+    }
+
+    $eacEntries = & $tar -tzf $eacArchive
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to inspect $eacArchiveName"
+    }
+    $normalizedEacEntries = $eacEntries | ForEach-Object { ($_ -replace '^\./', '').TrimEnd('/') }
+    $outsideEacRoot = $normalizedEacEntries | Where-Object {
+        $_ -and $_ -ne 'eac' -and !$_.StartsWith('eac/')
+    }
+    if ($outsideEacRoot) {
+        throw "EAC archive entry is outside the eac root: $($outsideEacRoot[0])"
+    }
+    $requiredEacEntries = @(
+        'eac/sidecar/server.js',
+        'eac/sidecar/bridge.js',
+        'eac/sidecar/phone-bridge.js',
+        'eac/sidecar/rescue-integration.js',
+        'eac/dsh-desktop/package.json',
+        'eac/dsh-desktop/lib/desktop/platform.js',
+        'eac/dsh-desktop/lib/desktop/runtime-paths.js',
+        'eac/dsh-desktop/lib/desktop/boot-server.js',
+        'eac/dsh-desktop/lib/desktop/android-resolve-sync.mjs',
+        'eac/dsh-desktop/node_modules/node-pty/prebuilds/android-arm64/pty.node',
+        'eac/dsh-desktop/node_modules/@koromix/koffi-android-arm64/index.cjs',
+        'eac/dsh-desktop/node_modules/@img/sharp-wasm32/package.json',
+        'eac/dsh-desktop/node_modules/@emnapi/runtime/package.json',
+        'eac/dsh-desktop/node_modules/tslib/package.json'
+    )
+    foreach ($requiredEntry in $requiredEacEntries) {
+        if ($normalizedEacEntries -notcontains $requiredEntry) {
+            throw "Bundled EAC runtime entry is missing: $requiredEntry"
+        }
+    }
+    $forbiddenEac = $normalizedEacEntries | Where-Object {
+        $_ -match '^eac/dsh-desktop/(vendor|native)(/|$)' -or
+        $_ -match '\.map$' -or
+        $_ -match '^eac/dsh-desktop/node_modules/@koromix/koffi-(?!android-arm64(?:/|$))' -or
+        $_ -match '^eac/dsh-desktop/node_modules/@img/sharp-(?!wasm32(?:/|$))' -or
+        $_ -match '^eac/dsh-desktop/node_modules/node-addon-require-builtin-' -or
+        $_ -match '^eac/dsh-desktop/node_modules/@vscode/ripgrep-' -or
+        $_ -match '^eac/dsh-desktop/node_modules/@deepseek-ai/node-addon-landlock-run-' -or
+        $_ -match '^eac/dsh-desktop/node_modules/node-pty/prebuilds/(?!android-arm64(?:/|$))' -or
+        $_ -match '^eac/dsh-desktop/node_modules/bare-(fs|path|url)/prebuilds(/|$)'
+    }
+    if ($forbiddenEac) {
+        throw "Non-Android EAC payload is bundled: $($forbiddenEac[0])"
+    }
+    $allowedEacNative = 'eac/dsh-desktop/node_modules/node-pty/prebuilds/android-arm64/pty.node'
+    $eacNativeBinaries = $normalizedEacEntries | Where-Object {
+        $_ -match '\.(exe|dll|pdb|node|bare)$' -or $_ -match '\.so(?:\.\d+)*$'
+    }
+    $unexpectedEacNative = $eacNativeBinaries | Where-Object { $_ -ne $allowedEacNative }
+    if ($unexpectedEacNative) {
+        throw "Unexpected native binary is bundled in EAC runtime: $($unexpectedEacNative[0])"
+    }
+    if ($eacNativeBinaries -notcontains $allowedEacNative) {
+        throw 'Bundled EAC Android node-pty module is missing'
+    }
+
+    $eacPackage = Get-ArchiveJson $eacArchive 'eac/dsh-desktop/package.json'
+    if ($eacPackage.version -ne $eacVersion) {
+        throw "Unexpected EAC version in runtime archive: $($eacPackage.version)"
+    }
+    $eacDependencyVersions = @{
+        'eac/dsh-desktop/node_modules/@img/sharp-wasm32/package.json' = '0.35.3'
+        'eac/dsh-desktop/node_modules/@emnapi/runtime/package.json' = '1.11.3'
+        'eac/dsh-desktop/node_modules/tslib/package.json' = '2.8.1'
+        'eac/dsh-desktop/node_modules/@koromix/koffi-android-arm64/package.json' = '3.1.5'
+    }
+    foreach ($entry in $eacDependencyVersions.GetEnumerator()) {
+        $metadata = Get-ArchiveJson $eacArchive $entry.Key
+        if ($metadata.version -ne $entry.Value) {
+            throw "Unexpected EAC dependency version in $($entry.Key): $($metadata.version)"
+        }
+    }
 }
 
 if ($ValidateOnly) {
@@ -335,7 +519,26 @@ if ($ValidateOnly) {
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) "paseo-android-runtime-$PID-$([guid]::NewGuid().ToString('N'))"
 try {
     $debDirectory = Join-Path $temporary 'deb'
-    New-Item -ItemType Directory -Force -Path $temporary, $debDirectory | Out-Null
+    $eacDebStage = Join-Path $temporary 'eac-deb'
+    $eacDeb = Join-Path $eacDebStage $eacDebName
+    New-Item -ItemType Directory -Force -Path $temporary, $debDirectory, $eacDebStage | Out-Null
+
+    $eacCacheCandidates = @()
+    if (![string]::IsNullOrWhiteSpace($env:PASEO_EAC_DEB_CACHE)) {
+        $eacCacheCandidates += $env:PASEO_EAC_DEB_CACHE
+    }
+    $eacCacheCandidates += $eacLocalCache
+    $cachedEacDeb = $eacCacheCandidates | Where-Object {
+        (Test-Path -LiteralPath $_ -PathType Leaf) -and (Get-Sha256 $_) -eq $eacDebSha256
+    } | Select-Object -First 1
+    if (![string]::IsNullOrWhiteSpace($cachedEacDeb)) {
+        Copy-Item -LiteralPath $cachedEacDeb -Destination $eacDeb
+    } else {
+        Invoke-WebRequest -UseBasicParsing -Uri $eacDebUrl -OutFile $eacDeb
+    }
+    if ((Get-Sha256 $eacDeb) -ne $eacDebSha256) {
+        throw "Downloaded checksum mismatch: $eacDebName"
+    }
 
     $repository = 'https://packages-cf.termux.dev/apt/termux-main'
     foreach ($package in $packages) {
@@ -387,9 +590,15 @@ try {
     $nativeStage = Join-Path $temporary '.android-native'
     $nodeData = Join-Path $nativeStage 'node-data'
     New-Item -ItemType Directory -Force -Path $nativeStage, $nodeData | Out-Null
-    & tar.exe -xf $nodePackage -C $nativeStage
+    & $tar -xf $nodePackage -C $nativeStage
     if ($LASTEXITCODE -ne 0) { throw 'Unable to extract the bundled Node.js package' }
-    & tar.exe -xf (Join-Path $nativeStage 'data.tar.xz') -C $nodeData
+    # Only the headers are needed (as node-gyp's nodedir for the node-pty build below).
+    # Extracting the whole payload also unpacks bin/corepack, the archive's one symlink,
+    # which bsdtar cannot create on Windows without SeCreateSymbolicLinkPrivilege and
+    # which fails the whole run. Restricting the member pattern keeps the
+    # include/node path shape the lookup below expects.
+    & $tar -xf (Join-Path $nativeStage 'data.tar.xz') -C $nodeData `
+        "./data/data/$legacyPackageName/files/usr/include/node"
     if ($LASTEXITCODE -ne 0) { throw 'Unable to extract the bundled Node.js headers' }
 
     $nodeInclude = Get-ChildItem -LiteralPath $nodeData -Recurse -Directory |
@@ -429,75 +638,167 @@ try {
     Get-ChildItem -LiteralPath $nodeModules -Recurse -File -Filter '*.map' |
         Remove-Item -Force
 
+    # pnpm vendors Windows-only fastlist helpers (x64/x86). Android cannot run
+    # them and the payload guard below rejects every .exe/.dll, so drop them
+    # here rather than letting assembly fail at the very last step.
+    $pnpmVendor = Join-Path $nodeModules 'pnpm\dist\vendor'
+    if (Test-Path -LiteralPath $pnpmVendor) {
+        Get-ChildItem -LiteralPath $pnpmVendor -Recurse -File |
+            Where-Object { $_.Name -match '\.(exe|dll)$' } |
+            Remove-Item -Force
+    }
+    $reflinkScope = Join-Path $nodeModules 'pnpm\dist\node_modules\@reflink'
+    if (Test-Path -LiteralPath $reflinkScope) {
+        Get-ChildItem -LiteralPath $reflinkScope -Directory |
+            Where-Object { $_.Name -like 'reflink-*' } |
+            Remove-Item -Recurse -Force
+    }
+
+    if (!(Test-Path -LiteralPath $gitTar -PathType Leaf)) {
+        throw "Git for Windows tar is required to unpack EAC: $gitTar"
+    }
+    if (!(Test-Path -LiteralPath $eacStageScript -PathType Leaf)) {
+        throw "EAC staging helper is missing: $eacStageScript"
+    }
+    foreach ($overlay in $eacOverlayHashes.GetEnumerator()) {
+        $overlayPath = Join-Path $eacOverlayRoot $overlay.Key
+        if (!(Test-Path -LiteralPath $overlayPath -PathType Leaf) -or
+            (Get-Sha256 $overlayPath) -ne $overlay.Value) {
+            throw "EAC Android overlay failed checksum verification: $($overlay.Key)"
+        }
+    }
+
+    $eacOuter = Join-Path $eacDebStage 'outer'
+    $eacPayload = Join-Path $eacOuter 'payload'
+    New-Item -ItemType Directory -Force -Path $eacOuter, $eacPayload | Out-Null
+    & $tar -xf $eacDeb -C $eacOuter
+    if ($LASTEXITCODE -ne 0) { throw "Unable to unpack $eacDebName" }
+    Push-Location $eacOuter
+    try {
+        # GNU tar handles the release's Unicode member names. Keep the archive path
+        # relative so the drive-letter colon is never interpreted as a remote host.
+        & $gitTar -xzf 'data.tar.gz' -C 'payload' 'usr/lib/Deepseek Harness EAC'
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to extract the EAC release payload' }
+    } finally {
+        Pop-Location
+    }
+
+    $eacSourceRoot = Join-Path $eacPayload 'usr\lib\Deepseek Harness EAC'
+    $eacLockFile = Join-Path $eacSourceRoot 'dsh-desktop\package-lock.json'
+    if (!(Test-Path -LiteralPath $eacLockFile -PathType Leaf)) {
+        throw 'The EAC release package-lock.json is missing'
+    }
+    $eacDependencyDownloads = Join-Path $temporary 'eac-dependency-downloads'
+    $sharpWasmRoot = Join-Path $temporary 'eac-dependencies\sharp-wasm32'
+    $emnapiRuntimeRoot = Join-Path $temporary 'eac-dependencies\emnapi-runtime'
+    $tslibRoot = Join-Path $temporary 'eac-dependencies\tslib'
+    New-Item -ItemType Directory -Force -Path $eacDependencyDownloads | Out-Null
+    Stage-NpmPackageFromLock $eacLockFile 'node_modules/@img/sharp-wasm32' `
+        $eacDependencyDownloads $sharpWasmRoot
+    Stage-NpmPackageFromLock $eacLockFile 'node_modules/@emnapi/runtime' `
+        $eacDependencyDownloads $emnapiRuntimeRoot
+    Stage-NpmPackageFromLock $eacLockFile 'node_modules/tslib' `
+        $eacDependencyDownloads $tslibRoot
+
+    $eacArchiveStage = Join-Path $temporary 'eac-archive'
+    $eacStagedRoot = Join-Path $eacArchiveStage 'eac'
+    New-Item -ItemType Directory -Force -Path $eacArchiveStage | Out-Null
+    & node.exe $eacStageScript `
+        --source $eacSourceRoot `
+        --output $eacStagedRoot `
+        --overlay $eacOverlayRoot `
+        --android-node-modules $nodeModules `
+        --sharp-wasm $sharpWasmRoot `
+        --emnapi-runtime $emnapiRuntimeRoot `
+        --tslib $tslibRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to stage the EAC Android runtime' }
+
     New-Item -ItemType Directory -Force -Path $assets | Out-Null
     if (Test-Path -LiteralPath $paseoArchive) {
         Remove-Item -LiteralPath $paseoArchive -Force
     }
-    & tar.exe -czf $paseoArchive -C $temporary node_modules
+    & $tar -czf $paseoArchive -C $temporary node_modules
     if ($LASTEXITCODE -ne 0) { throw 'Unable to create the Paseo runtime archive' }
-
-    $termuxStage = Join-Path $temporary 'termux-prefix'
-    New-Item -ItemType Directory -Path $termuxStage | Out-Null
-    foreach ($package in $packages) {
-        $packageStage = Join-Path $temporary "extract-$($package.Name)"
-        New-Item -ItemType Directory -Path $packageStage | Out-Null
-        & tar.exe -xf (Join-Path $debDirectory $package.Name) -C $packageStage
-        if ($LASTEXITCODE -ne 0) { throw "Unable to unpack $($package.Name)" }
-        & tar.exe --strip-components 6 -xf (Join-Path $packageStage 'data.tar.xz') -C $termuxStage
-        if ($LASTEXITCODE -ne 0) { throw "Unable to stage $($package.Name)" }
+    if (Test-Path -LiteralPath $eacArchive) {
+        Remove-Item -LiteralPath $eacArchive -Force
     }
+    & $tar -czf $eacArchive -C $eacArchiveStage eac
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to create the EAC runtime archive' }
 
-    $runtimeDirectoriesToPrune = @(
-        'include',
-        'share\doc',
-        'share\man',
-        'lib\cmake',
-        'lib\pkgconfig',
-        'lib\icu',
-        'share\icu'
-    )
-    foreach ($relativeDirectory in $runtimeDirectoriesToPrune) {
-        $directoryToPrune = Join-Path $termuxStage $relativeDirectory
-        if (Test-Path -LiteralPath $directoryToPrune) {
-            Remove-Item -LiteralPath $directoryToPrune -Recurse -Force
+    if ($SkipTermuxRuntime) {
+        if (!(Test-Path -LiteralPath $termuxArchive -PathType Leaf)) {
+            throw "-SkipTermuxRuntime needs the existing $termuxArchiveName"
         }
-    }
-
-    $runtimeFilesToPrune = @(
-        'lib\libicuio.so',
-        'lib\libicuio.so.78',
-        'lib\libicuio.so.78.3',
-        'lib\libicutest.so',
-        'lib\libicutest.so.78',
-        'lib\libicutest.so.78.3',
-        'lib\libicutu.so',
-        'lib\libicutu.so.78',
-        'lib\libicutu.so.78.3',
-        'lib\libsqlite3.53.4.so',
-        'lib\pkgIndex.tcl'
-    )
-    foreach ($relativeFile in $runtimeFilesToPrune) {
-        $fileToPrune = Join-Path $termuxStage $relativeFile
-        if (Test-Path -LiteralPath $fileToPrune) {
-            Remove-Item -LiteralPath $fileToPrune -Force
+        Write-Host "Reusing $termuxArchiveName built from the same pinned Termux packages."
+    } else {
+        $termuxStage = Join-Path $temporary 'termux-prefix'
+        New-Item -ItemType Directory -Path $termuxStage | Out-Null
+        foreach ($package in $packages) {
+            $packageStage = Join-Path $temporary "extract-$($package.Name)"
+            New-Item -ItemType Directory -Path $packageStage | Out-Null
+            & $tar -xf (Join-Path $debDirectory $package.Name) -C $packageStage
+            if ($LASTEXITCODE -ne 0) { throw "Unable to unpack $($package.Name)" }
+            # These payloads carry symlinks (libssl.so -> libssl.so.3 and friends, which
+            # node resolves through DT_NEEDED). Creating them on Windows needs
+            # SeCreateSymbolicLinkPrivilege, so run this from an elevated shell or with
+            # Developer Mode on. Pass -SkipTermuxRuntime to reuse the committed archive
+            # when only the Node payload changed.
+            & $tar --strip-components 6 -xf (Join-Path $packageStage 'data.tar.xz') -C $termuxStage
+            if ($LASTEXITCODE -ne 0) { throw "Unable to stage $($package.Name)" }
         }
-    }
 
-    $relocationCount = 0
-    foreach ($file in Get-ChildItem -LiteralPath $termuxStage -Recurse -File) {
-        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-        $relocationCount += Replace-AsciiPackageName $file.FullName
-    }
-    if ($relocationCount -eq 0) {
-        throw 'Official Termux package name was not found in runtime payload'
-    }
-    Assert-NoLegacyPackageName $termuxStage
+        $runtimeDirectoriesToPrune = @(
+            'include',
+            'share\doc',
+            'share\man',
+            'lib\cmake',
+            'lib\pkgconfig',
+            'lib\icu',
+            'share\icu'
+        )
+        foreach ($relativeDirectory in $runtimeDirectoriesToPrune) {
+            $directoryToPrune = Join-Path $termuxStage $relativeDirectory
+            if (Test-Path -LiteralPath $directoryToPrune) {
+                Remove-Item -LiteralPath $directoryToPrune -Recurse -Force
+            }
+        }
 
-    if (Test-Path -LiteralPath $termuxArchive) {
-        Remove-Item -LiteralPath $termuxArchive -Force
+        $runtimeFilesToPrune = @(
+            'lib\libicuio.so',
+            'lib\libicuio.so.78',
+            'lib\libicuio.so.78.3',
+            'lib\libicutest.so',
+            'lib\libicutest.so.78',
+            'lib\libicutest.so.78.3',
+            'lib\libicutu.so',
+            'lib\libicutu.so.78',
+            'lib\libicutu.so.78.3',
+            'lib\libsqlite3.53.4.so',
+            'lib\pkgIndex.tcl'
+        )
+        foreach ($relativeFile in $runtimeFilesToPrune) {
+            $fileToPrune = Join-Path $termuxStage $relativeFile
+            if (Test-Path -LiteralPath $fileToPrune) {
+                Remove-Item -LiteralPath $fileToPrune -Force
+            }
+        }
+
+        $relocationCount = 0
+        foreach ($file in Get-ChildItem -LiteralPath $termuxStage -Recurse -File) {
+            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $relocationCount += Replace-AsciiPackageName $file.FullName
+        }
+        if ($relocationCount -eq 0) {
+            throw 'Official Termux package name was not found in runtime payload'
+        }
+        Assert-NoLegacyPackageName $termuxStage
+
+        if (Test-Path -LiteralPath $termuxArchive) {
+            Remove-Item -LiteralPath $termuxArchive -Force
+        }
+        & $tar --format=ustar -czf $termuxArchive -C $termuxStage .
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to create the Termux Node runtime archive' }
     }
-    & tar.exe --format=ustar -czf $termuxArchive -C $termuxStage .
-    if ($LASTEXITCODE -ne 0) { throw 'Unable to create the Termux Node runtime archive' }
 } finally {
     if (Test-Path -LiteralPath $temporary) {
         $resolvedTemporary = [System.IO.Path]::GetFullPath($temporary)
@@ -520,12 +821,21 @@ if (Test-Path -LiteralPath $legacyDebDirectory) {
 
 $manifestLines = @(
     "$(Get-Sha256 $termuxArchive)  $termuxArchiveName",
-    "$(Get-Sha256 $paseoArchive)  $paseoArchiveName"
+    "$(Get-Sha256 $paseoArchive)  $paseoArchiveName",
+    "$(Get-Sha256 $eacArchive)  $eacArchiveName"
 )
-[System.IO.File]::WriteAllText(
-    $manifest,
-    ($manifestLines -join "`n") + "`n",
-    [System.Text.Encoding]::ASCII)
+$manifestTemporary = "$manifest.tmp"
+try {
+    [System.IO.File]::WriteAllText(
+        $manifestTemporary,
+        ($manifestLines -join "`n") + "`n",
+        [System.Text.Encoding]::ASCII)
+    Move-Item -LiteralPath $manifestTemporary -Destination $manifest -Force
+} finally {
+    if (Test-Path -LiteralPath $manifestTemporary) {
+        Remove-Item -LiteralPath $manifestTemporary -Force
+    }
+}
 
 Assert-RuntimePayload
 Write-Host 'Android runtime payload prepared and validated.'

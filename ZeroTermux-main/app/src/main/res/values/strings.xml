@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 
 <!DOCTYPE resources [
-    <!ENTITY TERMUX_PACKAGE_NAME "com.paseoe">
+    <!ENTITY TERMUX_PACKAGE_NAME "com.dshcli">
     <!ENTITY TERMUX_APP_NAME "Termux">
     <!ENTITY TERMUX_API_APP_NAME "Termux:API">
     <!ENTITY TERMUX_BOOT_APP_NAME "Termux:Boot">
@@ -16,7 +16,7 @@
     <string name="application_name">&TERMUX_APP_NAME;</string>
     <string name="shared_user_label">ZeroTermux user</string>
 
-    <string name="app_name">Paseo Enhanced</string>
+    <string name="app_name">DSHA</string>
 
     <!-- Termux RUN_COMMAND permission -->
     <string name="permission_run_command_label">Run commands in &TERMUX_APP_NAME; environment</string>
@@ -1404,8 +1404,8 @@ Known Issue: Rapid consecutive back operations may cause black screen in Interna
         ln[ \n
         Description: current directory internal storage path \n
         Note: Both paths must be absolute paths \n
-        Example: ln /data/data/com.paseoe/files/home/custom_name /sdcard/ \n
-        Example (or specify a directory): ln /data/data/com.paseoe/files/home/custom_name /sdcard/custom_directory/ \n
+        Example: ln /data/data/com.dshcli/files/home/custom_name /sdcard/ \n
+        Example (or specify a directory): ln /data/data/com.dshcli/files/home/custom_name /sdcard/custom_directory/ \n
         ] \n
         --------Version 0.2 Update--------\n
         zt dialog \n
@@ -1421,8 +1421,8 @@ Known Issue: Rapid consecutive back operations may cause black screen in Interna
         zt backgroundimage(bgi) Image path (set as current terminal background)\n
         backgroundimage(bgi)[\n
         Usage Help (full path required):\n
-        zt backgroundimage /data/data/com.paseoe/files/home/.img/back.jpg \n
-        zt bgi /data/data/com.paseoe/files/home/.img/back.jpg \n
+        zt backgroundimage /data/data/com.dshcli/files/home/.img/back.jpg \n
+        zt bgi /data/data/com.dshcli/files/home/.img/back.jpg \n
         ]\n
         \n
         zt qr Open Scan (scan QR code or barcode)\n
@@ -2042,11 +2042,39 @@ cd ~ &amp;&amp; pkg update -y \n
     <string name="zt_crash_history_thread">Thread: %1$s · Version: %2$s</string>
     <string name="zt_crash_history_detail_meta">Time: %1$s\nThread: %2$s\nVersion: %3$s\nException: %4$s\nMessage: %5$s</string>
     <string name="paseo_no_browser">No browser is available to open this link.</string>
+    <string name="paseo_state_preparing">Preparing EAC</string>
+    <string name="paseo_state_starting">EAC is starting</string>
+    <string name="paseo_state_running">EAC is running</string>
+    <string name="paseo_state_stopped">EAC is stopped</string>
+    <string name="paseo_state_error">EAC failed</string>
+    <string name="paseo_endpoint_label">Open or copy local address</string>
+    <string name="paseo_endpoint_format">Local · %1$s</string>
+    <string name="paseo_log_title">Log · dsh-web.log</string>
+    <string name="paseo_logs_empty">No EAC log output yet.</string>
+    <string name="paseo_action_start">Start</string>
+    <string name="paseo_action_enter">Enter</string>
+    <string name="paseo_action_restart">Restart</string>
+    <string name="paseo_action_stop">Stop</string>
+    <string name="paseo_action_port">Port</string>
+    <string name="paseo_action_copy_address">Copy address</string>
+    <string name="paseo_action_refresh_log">Refresh log</string>
+    <string name="paseo_status_starting_eac">Starting the EAC web service</string>
+    <string name="paseo_status_eac_stopped">EAC was stopped by the user</string>
+    <string name="paseo_address_copied">Local address copied</string>
     <string name="paseo_port_title">Paseo port</string>
-    <string name="paseo_port_message">Choose the local daemon and Web port. Port 6768 is reserved for the internal Codex proxy.</string>
-    <string name="paseo_port_confirm">Start</string>
+    <string name="paseo_port_message">Change the fallback Paseo port. EAC continues to use the actual port reported by its sidecar. Port 6768 is reserved for the internal Codex proxy.</string>
+    <string name="paseo_port_confirm">Apply</string>
     <string name="paseo_port_exit">Exit</string>
     <string name="paseo_port_error">Enter a port from 1024 to 65535, except 6768.</string>
+    <string name="paseo_action_connect_computer">Connect computer</string>
+    <string name="paseo_remote_title">Connect a computer</string>
+    <string name="paseo_remote_message">Open the DSH running on your computer to follow its progress. Paste the address it printed (the token is used once), or type host:port. Your computer must allow connections from this network.</string>
+    <string name="paseo_remote_hint">192.168.1.7:6767</string>
+    <string name="paseo_remote_confirm">Connect</string>
+    <string name="paseo_remote_disconnect">Disconnect</string>
+    <string name="paseo_remote_error">Enter the computer address as host:port. A loopback address is this phone: use Enter for that.</string>
+    <string name="paseo_remote_connected">Computer · %1$s</string>
+    <string name="paseo_remote_disconnected">Disconnected from the computer</string>
     <string name="paseo_action_retry">Retry</string>
     <string name="paseo_action_open_terminal">Open terminal</string>
     <string name="paseo_status_preparing_terminal">Preparing the embedded terminal</string>

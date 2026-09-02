@@ -86,7 +86,7 @@ test("custom Provider models carry the configured context window at runtime", ()
 test("saving Claude runtime settings leaves Codex byte-for-byte unchanged", () => {
   const originalCodex = {
     enabled: true,
-    command: ["/data/user/0/com.paseoe/files/usr/bin/codex"],
+    command: ["/data/user/0/com.dshcli/files/usr/bin/codex"],
     env: { OPENAI_API_KEY: "codex-secret" },
   };
   const existing = {
@@ -96,7 +96,7 @@ test("saving Claude runtime settings leaves Codex byte-for-byte unchanged", () =
 
   const updated = mergeProviderOverrides(existing, "claude", {
     enabled: true,
-    command: ["/data/user/0/com.paseoe/files/usr/bin/claude"],
+    command: ["/data/user/0/com.dshcli/files/usr/bin/claude"],
     env: { ANTHROPIC_API_KEY: "new-secret" },
   });
 
@@ -104,7 +104,7 @@ test("saving Claude runtime settings leaves Codex byte-for-byte unchanged", () =
   assert.notStrictEqual(updated.codex, originalCodex);
   assert.deepEqual(updated.claude, {
     enabled: true,
-    command: ["/data/user/0/com.paseoe/files/usr/bin/claude"],
+    command: ["/data/user/0/com.dshcli/files/usr/bin/claude"],
     env: { ANTHROPIC_API_KEY: "new-secret" },
   });
 });
@@ -120,7 +120,7 @@ test("provider view exposes status and environment keys without secret values", 
       error: "opencode binary not found",
     },
     {
-      command: ["/data/user/0/com.paseoe/files/usr/bin/opencode"],
+      command: ["/data/user/0/com.dshcli/files/usr/bin/opencode"],
       env: { OPENCODE_API_KEY: "do-not-return", BASE_URL: "https://example.test" },
     },
   );
@@ -447,7 +447,7 @@ test("runtime synchronization preserves provider commands across later daemon ch
     codex: { enabled: true, command: ["codex"] },
     claude: {
       enabled: true,
-      command: ["/data/user/0/com.paseoe/files/usr/bin/claude"],
+      command: ["/data/user/0/com.dshcli/files/usr/bin/claude"],
       env: { ANTHROPIC_API_KEY: "secret" },
     },
   };
@@ -474,7 +474,7 @@ test("mergeProviderOverrides preserves custom provider adapter metadata", () => 
     extends: "opencode",
     label: "我的 OpenCode",
     description: "App-private custom CLI",
-    command: ["/data/user/0/com.paseoe/files/home/.paseo-app/agents/bin/my-opencode", "acp"],
+    command: ["/data/user/0/com.dshcli/files/home/.paseo-app/agents/bin/my-opencode", "acp"],
     enabled: true,
   });
   assert.equal(merged["my-opencode"].extends, "opencode");

@@ -1,4 +1,4 @@
-#!/data/data/com.paseoe/files/usr/bin/sh
+#!/data/data/com.dshcli/files/usr/bin/sh
 echo ""
 echo "---------------------------------------------------------"
 echo ""

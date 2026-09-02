@@ -80,9 +80,9 @@ APK SHA-256：
 `3053755F0D62E107A3F85464B51205190A833A478E30A0EA2B4043A7908E2081`
 
 Android 工程位于 `ZeroTermux-main/`，离线运行时准备脚本位于
-`scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.paseoe`，可以与原来的
+`scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.dshcli`，可以与原来的
 ZeroTermux (`com.termux`) 共存；Termux Java namespace 仍保留为 `com.termux`，
-bootstrap 和运行时前缀已迁移到 `/data/data/com.paseoe/files/usr`。
+bootstrap 和运行时前缀已迁移到 `/data/data/com.dshcli/files/usr`。
 
 ### Agent CLI 安装与更新
 

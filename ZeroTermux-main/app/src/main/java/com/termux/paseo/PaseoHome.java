@@ -1,6 +1,9 @@
 package com.termux.paseo;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -85,9 +88,44 @@ public final class PaseoHome {
             }
         }
 
+        problems.addAll(rewriteLegacyPaths(legacy, unified));
+
         if (problems.isEmpty() && !legacy.delete()) {
             problems.add("Migrated everything but could not remove " + legacy.getAbsolutePath());
         }
         return problems;
+    }
+
+    /**
+     * Repoints absolute paths that the Agent CLI state recorded under the legacy home.
+     *
+     * <p>Moving the files is not enough: the state file stores the absolute path of every
+     * installed CLI, and each consumer validates those against an install root derived from the
+     * current {@code $HOME}. Left alone, a perfectly good install reads as missing and the user
+     * is told to reinstall.
+     *
+     * <p>The server repairs this on read too, so this pass is belt and braces for the window
+     * before the daemon starts, and for the case where the server cannot persist its repair.
+     * Only our own state file is touched; user-owned dotfiles are left exactly as they are.
+     */
+    private static List<String> rewriteLegacyPaths(File legacy, File unified) {
+        File agents = new File(new File(unified, ".paseo-app"), "agents");
+        File state = new File(agents, "agent-cli-state.json");
+        if (!state.isFile()) return Collections.emptyList();
+
+        String legacyPrefix = legacy.getAbsolutePath() + File.separator;
+        try {
+            String contents = new String(
+                Files.readAllBytes(state.toPath()), StandardCharsets.UTF_8);
+            if (!contents.contains(legacyPrefix)) return Collections.emptyList();
+            String rewritten = contents.replace(legacyPrefix, unified.getAbsolutePath() + File.separator);
+            Files.write(state.toPath(), rewritten.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            // The daemon repairs the same paths when it reads the state, so a failure here only
+            // costs the head start, never the install.
+            return Collections.singletonList(
+                "Could not repoint legacy paths in " + state.getAbsolutePath() + ": " + error);
+        }
+        return Collections.emptyList();
     }
 }

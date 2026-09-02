@@ -1,7 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 全局放行 —— 这是「连接电脑」的硬前提,不是疏忽,改回去会让那个功能失效。
+
+  电脑上的 DSH 默认就是明文服务:内核打印的地址形如 http://<ip>:<port>/?token=…,
+  而用户填的是任意一个局域网地址。这个文件是编译期静态的 —— 写不了网段,也没有运行时
+  API 能在用户点「连接」的那一刻只放行那一个 host。所以要么全局放行,要么这个功能在
+  真机上永远连不上。
+
+  后者已经用受控实验证实过:base-config 为 false 时,请求在平台层就被丢掉 ——
+  服务端一条请求都收不到,logcat 也不报错,用户只看到白屏,没有任何线索。
+
+  代价是真实的:页面引用的 http 子资源(script / img / XHR)不再被平台拦截,而子资源
+  不经过 PaseoNavigationPolicy。顶层跳转仍然被锁在「本机 sidecar」和「当前连的那台
+  电脑」这两个 origin 上,但局域网里的中间人能往明文流里注入内容。别在不可信的网络上
+  用「连接电脑」。
+-->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">127.0.0.1</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

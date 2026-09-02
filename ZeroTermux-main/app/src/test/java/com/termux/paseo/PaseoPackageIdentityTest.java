@@ -12,7 +12,7 @@ import org.junit.Test;
 
 public class PaseoPackageIdentityTest {
     private static final String LEGACY_PACKAGE = "com.termux";
-    private static final String STANDALONE_PACKAGE = "com.paseoe";
+    private static final String STANDALONE_PACKAGE = "com.dshcli";
 
     @Test
     public void standalonePackageDoesNotShareZeroTermuxIdentity() throws Exception {
@@ -69,15 +69,15 @@ public class PaseoPackageIdentityTest {
         for (String command : broadcastCommands) {
             String contents = read(new File("src/main/assets/runcommand", command));
             assertTrue(command + " must target the standalone reload action",
-                contents.contains("com.paseoe.app.reload_style"));
+                contents.contains("com.dshcli.app.reload_style"));
             assertTrue(command + " must target the standalone package",
-                contents.contains("-a com.paseoe.app.reload_style com.paseoe"));
+                contents.contains("-a com.dshcli.app.reload_style com.dshcli"));
             assertFalse(command + " still targets ZeroTermux",
                 contents.contains("com.termux.app.reload_style"));
         }
 
         String adbShell = read(new File("src/main/assets/runcommand/termux-adb-shell.sh"));
-        assertTrue(adbShell.contains("/data/user/0/com.paseoe/files/home"));
+        assertTrue(adbShell.contains("/data/user/0/com.dshcli/files/home"));
         assertFalse(adbShell.contains("/data/user/0/com.termux"));
     }
 
