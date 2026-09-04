@@ -18,17 +18,16 @@ $termuxArchiveName = 'termux-node-runtime-arm64.tgz'
 $termuxArchive = Join-Path $assets $termuxArchiveName
 $eacArchiveName = 'eac-runtime-arm64.tgz'
 $eacArchive = Join-Path $assets $eacArchiveName
-$eacVersion = '5.3.1'
-$eacDebName = 'Deepseek.Harness.EAC_5.3.1_amd64.deb'
-$eacDebUrl = 'https://github.com/zouyuxuan122/DSH-Desktop-EAC/releases/download/v5.3.1/Deepseek.Harness.EAC_5.3.1_amd64.deb'
-$eacDebSha256 = '1a72ba95042c26d06a19bc1128e674543df149fc8b47eb95e25ae708339757a1'
+$eacVersion = '5.3.6'
+$eacDebName = 'Deepseek.Harness.EAC_5.3.6_amd64.deb'
+$eacDebUrl = 'https://github.com/zouyuxuan122/DSH-Desktop-EAC/releases/download/v5.3.6/Deepseek.Harness.EAC_5.3.6_amd64.deb'
+$eacDebSha256 = '05acc5e789d1a3919d56bfc21f1b7f97b764f9be48d5fd39a76108606605a2fc'
 $eacStageScript = Join-Path $PSScriptRoot 'stage-eac-android-runtime.mjs'
 $eacOverlayRoot = Join-Path $PSScriptRoot 'eac-android-overlay'
 $eacOverlayHashes = @{
     'platform.js' = '3418ec87be338f3d308e6ddb782685cd48c3b9208c60028348beae3525082a5f'
-    'runtime-paths.js' = '39878c97b96e78be45cf8fcac351379d7186119eef9defac99d4fc072010ef9e'
-    'boot-server.js' = 'aa68714af6e2f69e18ca1d1ee0969036bbd75169e6cff52bce1d98c365897ba4'
-    'credentials-version.cjs' = '014436b318088759b04776a6060499f226e3fcaa9c54d170f2a3f765b8bd6bfd'
+    'runtime-paths.js' = 'e17aa2193b317891f955c613d7961250efe553a2d27ccce98afbf407b8707bbe'
+    'boot-server.js' = '32f6863dd13341dc7c435f40eaedf9892500c8dd7ab3169e0fd2c6d3728dad96'
     'android-resolve-sync.mjs' = '6003c183975b40d88364821610d30023c80087cffe9429fa4531bfd00d2b08c5'
     'resolve-sync-plan.mjs' = '96bad72d9c8a70b340a071e72e08b8de5ee4230809452e6f797c497fd5c46b79'
     'android-fs-patch.mjs' = 'a73c36f7ebe26300d5036c039c7a85f866f5dd0d2d1a783640912550d247be80'
@@ -48,7 +47,7 @@ if (!(Test-Path -LiteralPath $tar)) {
     throw "Windows bsdtar not found at $tar"
 }
 $gitTar = Join-Path $env:ProgramFiles 'Git\usr\bin\tar.exe'
-$eacLocalCache = 'D:\cache\eac-linux\eac-5.3.1-amd64.deb'
+$eacLocalCache = 'D:\cache\eac-linux\eac-5.3.6-amd64.deb'
 $legacyPackageName = 'com.termux'
 $standalonePackageName = 'com.dshcli'
 $latin1 = [System.Text.Encoding]::GetEncoding(28591)
@@ -540,8 +539,18 @@ try {
         throw "Downloaded checksum mismatch: $eacDebName"
     }
 
+    # The rolling Termux repo drops old deb revisions (ca-certificates
+    # 2026.07.16 is already 404). Only nodejs-lts is consumed when
+    # -SkipTermuxRuntime reuses the committed archive (Node headers for the
+    # node-pty build); the other six debs feed the termux prefix build alone
+    # and are skipped. A full rebuild still verifies every package.
+    $packagesToFetch = if ($SkipTermuxRuntime) {
+        $packages | Where-Object { $_.Name -like 'nodejs-lts*' }
+    } else {
+        $packages
+    }
     $repository = 'https://packages-cf.termux.dev/apt/termux-main'
-    foreach ($package in $packages) {
+    foreach ($package in $packagesToFetch) {
         $destination = Join-Path $debDirectory $package.Name
         $bundledSource = Join-Path $legacyDebDirectory $package.Name
         if ((Test-Path -LiteralPath $bundledSource -PathType Leaf) -and

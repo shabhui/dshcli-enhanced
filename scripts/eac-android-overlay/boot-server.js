@@ -4,6 +4,7 @@ exports.init = init;
 exports.getServerProc = getServerProc;
 exports.getWebUrl = getWebUrl;
 exports.setIsRestarting = setIsRestarting;
+exports.healCredentialsVersion = healCredentialsVersion;
 exports.webServerNodeArgs = webServerNodeArgs;
 exports.startAndWait = startAndWait;
 exports.stopServer = stopServer;
@@ -25,9 +26,9 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const cp = require("node:child_process");
+const atomic_json_1 = require("../atomic-json");
 // 兄弟 / 根模块窄签名消费（Wave 3 收编完成后改为具名类型化导入）。
 const { killTree, killTreeAndWait, waitForProcExit, childEnv, childProcessSpawnOptions } = require('./proc');
-const { expectedVersionScalar, planCredentialsHeal } = require('./credentials-version.cjs');
 const { restrictedPortOf, chooseStableWebPort } = require('../../stable-port');
 const { createStreamWriteGuard } = require('../../stream-write-guard');
 let ctx;
@@ -40,53 +41,61 @@ function getWebUrl() { return webUrl; }
 function setIsRestarting(v) { restartingServer = v; }
 function logsDir() { return path.join(ctx.getUserDataDir(), 'logs'); }
 function dshWebLogPath() { return path.join(logsDir(), 'dsh-web.log'); }
-// 凭据版式自愈。上游这里写死成 YAML 字符串 "1"，但 5.3.1 同一个 deb 里的
-// dsh-credentials-local 校验的是数字 1（lib/index.js:151
-// `if (fields["version"] !== 1)`）。内核自己写出来的就是数字，被上游这段改成
-// 字符串后，下一次启动 100% 死在：
-//
-//   credentials-local: .../.credentials.yaml declares version "1";
-//   this build reads version 1
-//
-// 真机实测就是这个（dsh web 退出码 1，dsh-web.log 里是上面这行）。所以形态改为
-// 问【实际会跑的那个校验器】要，判别不出来就不动 —— 沿用上游「看不懂则不动，
-// 交由内核报错路径展示」的立场。决策是纯函数，见 credentials-version.cjs。
-// 失败不阻塞启动。
-function credentialsValidatorSource() {
-    // 先用 node 自己的解析（本文件在 dsh-desktop/lib/desktop，node 会往上找到
-    // dsh-desktop/node_modules）。该包是 ESM，require 它会失败，所以只 resolve
-    // 路径再读文件。resolve 不通时退回手算路径。
-    const candidates = [];
-    try {
-        candidates.push(require.resolve('@deepseek-ai/dsh-credentials-local/lib/index.js'));
-    }
-    catch { /* 退回手算 */ }
-    candidates.push(path.join(__dirname, '..', '..', 'node_modules', '@deepseek-ai', 'dsh-credentials-local', 'lib', 'index.js'));
-    for (const candidate of candidates) {
-        try {
-            if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8');
-        }
-        catch { /* 下一个候选 */ }
-    }
-    return null;
-}
-
+// 0.1.2 暗雷自愈（凭据版式）：内核 credentials-local 只认 version:1 +
+// refs:/records: 版式，两种历史形态会被拒启 → 每次启动必死（/died 页）：
+//   a) 全新建库路径把顶层 version 写成 YAML 字符串 "1"（读取严格 ===1）；
+//   b) rc.2 时代的扁平文件（顶层直接放标量凭据，"pre-release flat layout"）。
+// 这里在拉起内核前做文本级自愈：a) 引号 version 规整为数字；b) 扁平文件的
+// 标量顶层条目收进 refs:、records: 块原样保留在根（语义对齐内核
+// renderFlatLayoutMigration，且绝不触碰任何密钥值）；形态看不懂就不动，
+// 交内核报错路径展示。失败不阻塞启动。
+/**
+ * .credentials.yaml 版式自愈（导出供单测）：0.1.2 内核 credentials-local 只认
+ * version:1 + refs:/records: 版式 —— 引号 version（"1"）与 rc.2 扁平文件都会
+ * 被拒启（「升级后启动必死」级故障，5.3.0 实战事故的反向自愈半边）。
+ */
 function healCredentialsVersion() {
     try {
         const home = childEnv().DSH_HOME || path.join(os.homedir(), '.dsh');
         const file = path.join(home, '.credentials.yaml');
         if (!fs.existsSync(file))
             return;
-        const expected = expectedVersionScalar(credentialsValidatorSource());
-        if (expected === null) {
-            ctx.log('dsh', '跳过 .credentials.yaml 自愈：读不出 credentials-local 要求的 version 形态');
-            return;
-        }
         const text = fs.readFileSync(file, 'utf8');
-        const plan = planCredentialsHeal(text, expected);
-        if (plan.changed) {
-            fs.writeFileSync(file, plan.text);
-            ctx.log('dsh', `已自愈 .credentials.yaml 版式（credentials-local 要求 version: ${expected}）`);
+        let fixed = text.replace(/^([ \t]*)version:[ \t]*["']1["'][ \t]*$/m, '$1version: 1');
+        if (!/^([ \t]*)version:[ \t]*\S/m.test(fixed)) {
+            const scalar = [];
+            const rest = [];
+            let inRecords = false;
+            let recognizable = true;
+            for (const line of fixed.split('\n')) {
+                if (/^records:[ \t]*$/.test(line)) {
+                    inRecords = true;
+                    rest.push(line);
+                    continue;
+                }
+                if (inRecords) {
+                    rest.push(line);
+                    continue;
+                }
+                // 标量行：key: value —— value 是任意非空白串（原实现 \S 只匹配单字符，
+                // 真实 API key 全是多字符 → 扁平迁移分支永不触发，5.3.0 起潜伏）。
+                if (/^[A-Za-z_][A-Za-z0-9_-]*:[ \t]*\S+(?:[ \t]+\S+)*[ \t]*$/.test(line)) {
+                    scalar.push(line);
+                    continue;
+                }
+                if (line.trim() === '')
+                    continue;
+                recognizable = false;
+                break;
+            }
+            if (recognizable && scalar.length > 0) {
+                fixed = 'version: 1\nrefs:\n' + scalar.map((l) => '  ' + l).join('\n') + '\n' + rest.join('\n').replace(/\n*$/, '\n');
+            }
+        }
+        if (fixed !== text) {
+            // .credentials.yaml 截断 = 凭据全丢：必须原子写。
+            (0, atomic_json_1.writeFileAtomic)(file, fixed);
+            ctx.log('dsh', '已自愈 .credentials.yaml 版式（0.1.2 只认 version:1 + refs:/records:；引号 version 或 rc.2 扁平文件会被拒启）');
         }
     }
     catch { /* 自愈失败交由内核报错路径展示 */ }
@@ -110,6 +119,10 @@ function healCredentialsVersion() {
  * dsh-client-modules 无条件按 v1 形状调用，不补则客户端插件表恒为空。由调用方
  * 传入而非在此拼装，是为了让「文件不存在就不要传」的判断留在有 fs 的那一侧 ——
  * --import 指向不存在的文件会让 node 直接启动失败。
+ *
+ * androidFsPatch 是 android-fs-patch.mjs 的绝对路径：link() 在 Android 应用数据
+ * 目录里被 SELinux 拒（EACCES），而内核用它发布会话文件，不补则每轮对话结束都
+ * 写不下去。同样由调用方探测后传入。
  */
 function webServerNodeArgs(o) {
     const platform = o.platform ?? process.platform;
@@ -141,8 +154,13 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
     // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME。
     if (serverProc && !serverProc.killed && !ctx.isQuitting()) {
         ctx.log('dsh', 'startServer 重入：先终结旧进程再启动');
-        killTree(serverProc);
+        const old = serverProc;
+        killTree(old);
         serverProc = null;
+        // 等旧进程真正退出再 spawn：Windows 控制台进程的强杀在 killTree 内
+        // +1500ms 落地，立即重拉必然 EADDRINUSE（「启动失败」假阳性来源，
+        // 5.3.2 及以前只 kill 不等）。
+        await waitForProcExit(old, 20000);
     }
     healCredentialsVersion();
     // 稳定端口（stable-port）：复用 settings.webPort，避免每次 --port 0 换
@@ -158,6 +176,26 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
             return reject(new Error('找不到内置 Node 运行时: ' + nodeBin));
         }
         fs.mkdirSync(logsDir(), { recursive: true });
+        // 启动截断：append-only 无轮转，长寿命安装会积累出数百 MB 的 dsh-web.log。
+        // 超过 10MB 时保留尾部 2MB —— 诊断链路只读 tail（rescue-agent 与恢复
+        // 中心的 readLog 均带 32KB tail 上限），头部是重复的启动横幅无信息量。
+        try {
+            const LOG_TRIM_THRESHOLD = 10 * 1024 * 1024;
+            const LOG_KEEP_TAIL = 2 * 1024 * 1024;
+            const st = fs.statSync(dshWebLogPath());
+            if (st.size > LOG_TRIM_THRESHOLD) {
+                const keep = Buffer.alloc(LOG_KEEP_TAIL);
+                const fd = fs.openSync(dshWebLogPath(), 'r');
+                try {
+                    fs.readSync(fd, keep, 0, LOG_KEEP_TAIL, st.size - LOG_KEEP_TAIL);
+                }
+                finally {
+                    fs.closeSync(fd);
+                }
+                fs.writeFileSync(dshWebLogPath(), keep);
+            }
+        }
+        catch { /* 无旧日志/读取失败都不影响启动 */ }
         const out = fs.createWriteStream(dshWebLogPath(), { flags: 'a' });
         const patchArgs = overlays
             .filter((p) => typeof p === 'string' && p && fs.existsSync(p))
@@ -241,11 +279,14 @@ function watchServerProc(proc, out, opts) {
                     handedOff = true;
                     ctx.log('dsh', `端口 ${blocked} 属于 Chromium 受限端口（ERR_UNSAFE_PORT），重启服务换端口（剩余重试 ${opts.unsafePortRetries} 次）`);
                     killTree(proc);
-                    setTimeout(() => {
+                    // 等旧进程退出后再换端口重启：600ms 固定延迟早于强杀落地，
+                    // 新实例大概率又撞 EADDRINUSE。
+                    void (async () => {
+                        await waitForProcExit(proc, 20000);
                         if (ctx.isQuitting())
                             return finish(new Error('应用正在退出'), '');
                         startServer(opts.unsafePortRetries - 1, opts.overlays).then((url) => finish(null, url), (err) => finish(err, ''));
-                    }, 600);
+                    })();
                     return;
                 }
                 // 稳定端口：若 dsh 最终监听端口与请求的不同（极端兜底），以实际为准并保存。

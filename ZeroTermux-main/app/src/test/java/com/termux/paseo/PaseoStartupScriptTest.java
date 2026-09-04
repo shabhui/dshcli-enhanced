@@ -326,7 +326,7 @@ public class PaseoStartupScriptTest {
             Files.readAllBytes(runtimeVersionFile.toPath()), StandardCharsets.UTF_8);
 
         assertTrue(installer.contains(
-            "RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.1-arm64-v10\""));
+            "RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.6-arm64-v11\""));
         assertTrue(runtimeVersion.contains("runtime-15"));
         assertTrue(installer.contains("[ -f \"$RUNTIME_OWNERSHIP\" ]"));
     }

@@ -9,7 +9,7 @@ import {
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const EAC_VERSION = "5.3.1";
+export const EAC_VERSION = "5.3.6";
 
 const SIDECAR_FILES = ["server.js", "bridge.js", "phone-bridge.js", "rescue-integration.js"];
 const DESKTOP_OVERLAYS = [
@@ -20,9 +20,6 @@ const DESKTOP_OVERLAYS = [
   // android-resolve-sync.mjs 相对导入它。漏了这个文件，node 会因 --import 的模块
   // 解析失败而直接启动不了，比不打补丁更糟。
   "resolve-sync-plan.mjs",
-  // boot-server.js require 它。.cjs 而非 .js：本仓 package.json 是
-  // "type": "module"，同名 .js 会被当成 ESM。
-  "credentials-version.cjs",
   // link() 在 Android 应用数据目录里被 SELinux 拒（EACCES），内核用它发布会话文件，
   // 每轮对话结束都写不下去。boot-server 以 --import 传入这个入口。
   "android-fs-patch.mjs",

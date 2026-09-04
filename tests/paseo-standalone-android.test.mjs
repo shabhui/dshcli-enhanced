@@ -152,15 +152,19 @@ test("standalone Android keeps local Paseo usable when internet access is offlin
   );
 });
 
-test("standalone Android opens the in-app private workspace browser from create-workspace actions", async () => {
+test("create-workspace actions prefer the SAF picker and fall back to the in-app browser", async () => {
   const bootstrap = await source("web/paseo-standalone-bootstrap.js");
 
   assert.match(bootstrap, /paseo:open-workspace-browser/u);
   assert.match(bootstrap, /openWorkspaceBrowser/u);
   assert.doesNotMatch(bootstrap, /function bindAndroidWorkspaceActions\(\) \{\n    if \(!isAndroidBridgeAvailable\(\)\) return;/u);
   const binding = bootstrap.match(/function bindAndroidWorkspaceActions\(\) \{[\s\S]*?\n  \}/u)?.[0] || "";
+  // SAF 优先：bridge 在（真机 WebView）走系统文件管理器选目录；
+  // bridge 不在（电脑端浏览器打开）退回自制目录浏览器。
+  assert.match(binding, /isAndroidBridgeAvailable\(\)/u);
+  assert.match(binding, /pickWorkspaceDirectory\(\)/u);
   assert.match(binding, /openWorkspaceBrowser\(\)/u);
-  assert.doesNotMatch(binding, /pickWorkspaceDirectory\(\)/u);
+  assert.match(binding, /paseo:directory-picked/u);
   assert.match(bootstrap, /add-project-flow-method-new-directory/);
   assert.match(bootstrap, /add-project-flow-method-directory-search/);
   assert.match(bootstrap, /min-height:56px/);
@@ -188,7 +192,7 @@ test("Android runtime generation forces existing installs to receive standalone 
 
   assert.match(
     runtimeInstaller,
-    /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-npm-11\.16\.0-pnpm-11\.7\.0-eac-5\.3\.1-arm64-v10"/,
+    /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-npm-11\.16\.0-pnpm-11\.7\.0-eac-5\.3\.6-arm64-v11"/,
   );
   assert.match(runtimeVersion, /paseo-enhanced-2\.3\.6-runtime-15/);
   assert.match(runtimeInstaller, /\[ -f "\$RUNTIME_OWNERSHIP" \]/u);
@@ -206,8 +210,8 @@ test("Android runtime bundles and atomically installs the EAC payload", async ()
   assert.match(assembler, /node_modules\/@emnapi\/runtime/u);
   assert.match(assembler, /node_modules\/tslib/u);
   assert.match(assembler, /koffi-android-arm64/u);
-  assert.match(assembler, /Deepseek\.Harness\.EAC_5\.3\.1_amd64\.deb/u);
-  assert.match(assembler, /1a72ba95042c26d06a19bc1128e674543df149fc8b47eb95e25ae708339757a1/u);
+  assert.match(assembler, /Deepseek\.Harness\.EAC_5\.3\.6_amd64\.deb/u);
+  assert.match(assembler, /05acc5e789d1a3919d56bfc21f1b7f97b764f9be48d5fd39a76108606605a2fc/u);
   assert.match(assembler, /\$manifestLines[\s\S]*\$eacArchiveName/u);
 
   assert.match(installer, /EAC_ARCHIVE="\$PACKAGES_DIR\/eac-runtime-arm64\.tgz"/u);

@@ -15,7 +15,7 @@ test("Android startup provides every Agent a concrete mobile environment prompt"
 
   assert.match(startup, /PASEO_BASE_SYSTEM_PROMPT_FILE/u);
   assert.match(startup, /Android application sandbox/u);
-  assert.match(startup, /com\.paseoe/u);
+  assert.match(startup, /com\.dshcli/u);
   assert.match(startup, /Do not assume Windows, macOS, desktop Linux/u);
   assert.match(startup, /Commands confirmed present: \$DETECTED_COMMANDS/u);
   assert.match(bootstrap, /baseSystemPrompt/u);

@@ -16,7 +16,6 @@ const DESKTOP_OVERLAYS = [
   "boot-server.js",
   "android-resolve-sync.mjs",
   "resolve-sync-plan.mjs",
-  "credentials-version.cjs",
   "android-fs-patch.mjs",
   "android-hardlink.mjs",
 ];
@@ -207,7 +206,7 @@ test("rejects an EAC source from a different release", async (t) => {
   await put(f.sourceRoot, "dsh-desktop/package.json",
     JSON.stringify({ name: "dsh-desktop", version: "5.3.0" }));
 
-  await assert.rejects(stageEacAndroidRuntime(stageOptions(f)), /EAC 5\.3\.1/);
+  await assert.rejects(stageEacAndroidRuntime(stageOptions(f)), /EAC 5\.3\.6/);
 });
 
 test("rejects an incomplete official sidecar payload", async (t) => {

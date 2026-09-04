@@ -38,6 +38,9 @@ function runtimeExecPath() {
 function termuxPrefix() {
     return path.posix.dirname(path.posix.dirname(runtimeExecPath().split(path.win32.sep).join('/')));
 }
+function appRoot() {
+    return typeof ctx.appRoot === 'function' ? ctx.appRoot() : exports.APP_ROOT;
+}
 function nodeExe() {
     // Android（Termux）既没有 vendor/ 也没有 Electron 的 resourcesPath，node 由宿主
     // 提供。桌面版那两条路径在设备上都不存在，而 boot-server 对 nodeExe() 做
@@ -48,9 +51,17 @@ function nodeExe() {
     if (runtimePlatform() === 'android')
         return runtimeExecPath();
     const executable = (0, platform_1.nodeExecutableName)(runtimePlatform());
-    if (isPackaged())
+    // Tauri 布局：应用树 = <DSH_RESOURCE_ROOT>/dsh-desktop（= APP_ROOT），内置
+    // Node 在 vendor/node/ 下；isPackaged 真实判定（5.3.3 批次 D）后打包分支
+    // 必须优先走这里 —— 5.3.2 恒 false 掩盖了该差异（打包态其实一直在用
+    // 开发分支的路径）。旧 Electron 布局 resources/node/ 保留为兼容候选。
+    const tauriBundled = path.resolve(appRoot(), 'vendor', 'node', executable);
+    if (isPackaged()) {
+        if (fs.existsSync(tauriBundled))
+            return tauriBundled;
         return path.join(resourcesDir(), 'node', executable);
-    return path.resolve(exports.APP_ROOT, 'vendor', 'node', executable);
+    }
+    return tauriBundled;
 }
 function npmCli() {
     // B0 把 npm 装到 $PREFIX/lib/node_modules/npm（Termux 的标准布局），
@@ -58,9 +69,13 @@ function npmCli() {
     if (runtimePlatform() === 'android') {
         return path.posix.join(termuxPrefix(), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
     }
-    if (isPackaged())
+    const tauriBundled = path.resolve(appRoot(), 'vendor', 'npm', 'bin', 'npm-cli.js');
+    if (isPackaged()) {
+        if (fs.existsSync(tauriBundled))
+            return tauriBundled;
         return path.join(resourcesDir(), 'npm', 'bin', 'npm-cli.js');
-    return path.resolve(exports.APP_ROOT, 'vendor', 'npm', 'bin', 'npm-cli.js');
+    }
+    return tauriBundled;
 }
 // Context shared with the updater module.
 function updCtx() {
