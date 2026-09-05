@@ -1,10 +1,17 @@
-# Paseo Enhanced
+# DSHA（Paseo Enhanced）
 
-面向 Android + Termux 自托管场景的 Paseo 0.3.1 增强层。项目保留官方
-Paseo 的运行方式，只增加本地管理界面、供应商切换和移动端可用性修复。
+Android 自托管 AI 工作台。`com.dshcli` 的 DSHA 应用内置 Termux 运行时、Paseo 0.3.1
+增强层和 DeepSeek Harness EAC 5.3.6 桌面壳（dsh 内核），全部离线安装、本机启动。
+增强层保留官方 Paseo 的运行方式，只增加本地管理界面、供应商切换和移动端可用性修复。
 
 ## 功能
 
+- DeepSeek Harness EAC 5.3.6 桌面壳（dsh 内核 0.1.2-alpha.1）：冷启动自动引导，控制页
+  提供启动/进入/重启/停止、端口与日志查看。
+- EAC「添加工作区」接入 Android 系统文件管理器（SAF）：选择共享存储目录时补请求
+  权限，选完自动回填真实路径完成创建。
+- EAC 移动端适配 shim 家族：Locale/TimeZone/MobileCss/Touch/Dialog，console 输出转发
+  logcat。
 - Codex 供应商、模型、权限和 API Key 管理，密钥输入可直接粘贴。
 - 对话内“挤入模式”：上游繁忙时按原请求节奏持续重试，成功或关闭开关后停止。
 - 获取供应商模型列表。
@@ -68,16 +75,17 @@ npm install -g @getpaseo/cli@0.3.1
 
 ## Android 客户端
 
-独立 arm64 APK 作为 `v2.3.2` GitHub Release 附件发布；本地构建产物位于
-`android/releases/PaseoEnhanced-v2.3.2-arm64.apk`，不纳入 Git 跟踪。它已经内置 Termux
-bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.6、内置 Codex CLI 0.147.0 和 Android arm64
-原生模块，不需要另外安装 ZeroTermux 或 Termux。首次启动会在应用私有目录离线
-安装这些运行文件，启动 Paseo Daemon，等待 `http://127.0.0.1:6767/` 就绪后直接
-打开 Web UI。`v2.3.2` 修复了 Windows 构建生成 CRLF runtime manifest 时首次安装误报
-缺少内置压缩包的问题。最低系统版本为 Android 7.0（API 24）。
+独立 arm64 APK 作为 `v2.3.6` GitHub Release 附件发布；本地构建产物位于
+`android/releases/DSHA-v2.3.6-arm64.apk`，不纳入 Git 跟踪。它已经内置 Termux
+bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.6、内置 Codex CLI 0.147.0、
+npm 11.16.0 / pnpm 11.7.0 和 DeepSeek Harness EAC 5.3.6 桌面壳（dsh 内核 0.1.2-alpha.1
+及 Android arm64 原生模块），不需要另外安装 ZeroTermux 或 Termux。首次启动会在应用
+私有目录离线安装这些运行文件，启动 Paseo Daemon，等待 `http://127.0.0.1:6767/` 就绪后
+直接打开 Web UI；EAC 桌面壳由控制页一键引导，同样在应用私有目录运行。最低系统版本为
+Android 7.0（API 24）。
 
 APK SHA-256：
-`3053755F0D62E107A3F85464B51205190A833A478E30A0EA2B4043A7908E2081`
+`9491EA112D21177129FA3E35A3919990B665CB970CF5284BD51C16BA4624B0AF`
 
 Android 工程位于 `ZeroTermux-main/`，离线运行时准备脚本位于
 `scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.dshcli`，可以与原来的
