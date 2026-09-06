@@ -167,7 +167,21 @@ public class PaseoWebViewConfigTest {
 
         assertTrue(activity.contains("openTermuxTerminal"));
         assertTrue(activity.contains("new Intent(PaseoActivity.this, TermuxActivity.class)"));
-        assertTrue(activity.contains("runOnUiThread(PaseoActivity.this::launchTermuxActivity)"));
+        assertTrue(activity.contains("if (!isLocalBridgeAllowed()) return;"));
+    }
+
+    @Test
+    public void nativeBridgeAndAndroidShimsAreRestrictedToTheLocalPaseoPage() throws Exception {
+        File activityFile = new File("src/main/java/com/termux/paseo/PaseoActivity.java");
+        String activity = new String(
+            Files.readAllBytes(activityFile.toPath()), StandardCharsets.UTF_8);
+
+        assertTrue(activity.contains("private boolean isLocalWebViewPage(String url)"));
+        assertTrue(activity.contains("private boolean isLocalBridgeAllowed()"));
+        assertTrue(activity.contains("if (isLocalBridgeAllowed()) launchDirectoryPicker()"));
+        assertTrue(activity.contains("if (isLocalBridgeAllowed()) showPortDialog()"));
+        assertTrue(activity.contains("if (!isLocalBridgeAllowed() || webView == null) return;"));
+        assertTrue(activity.contains("if (!isLocalWebViewPage(url)) return;"));
     }
 
     @Test
@@ -183,6 +197,11 @@ public class PaseoWebViewConfigTest {
         assertTrue(activity.contains("requestPermissions("));
         assertTrue(activity.contains("WRITE_EXTERNAL_STORAGE"));
         assertFalse(activity.contains("READ_EXTERNAL_STORAGE"));
+        String coldStart = activity.substring(activity.indexOf("protected void onCreate("),
+            activity.indexOf("private boolean hasStoragePermission("));
+        assertFalse(coldStart.contains("requestStoragePermissionIfNeeded()"));
+        assertTrue(activity.contains("pendingDirectoryPath = path"));
+        assertTrue(activity.contains("onRequestPermissionsResult("));
     }
 
     @Test

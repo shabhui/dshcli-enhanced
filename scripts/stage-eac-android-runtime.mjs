@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,6 +36,31 @@ const PACKAGE_VERSIONS = new Map([
 const ALLOWED_NATIVE_BINARY =
   "dsh-desktop/node_modules/node-pty/prebuilds/android-arm64/pty.node";
 const FORBIDDEN_BINARY = /\.(?:exe|dll|pdb|node|bare)$|\.so(?:\.\d+)*$/i;
+const RETIRED_BUILTIN_PLUGINS = [
+  { id: "dsh-pet", name: "dsh-pet", directory: "dsh-pet" },
+  { id: "dsh-pet-settings", name: "dsh-pet-settings", directory: "dsh-pet-settings" },
+  { id: "dsh-whale-widget", name: "dsh-whale-widget", directory: "dsh-whale-widget" },
+  { id: "float-window", name: "@deepseek-ai/dsh-float-window", directory: "dsh-float-window" },
+  { id: "meow-smooth", name: "meow-smooth", directory: "dsh-meow-smooth" },
+  { id: "skin-switch", name: "@deepseek-ai/dsh-skin-switch", directory: "dsh-skin-switch" },
+  { id: "soul-md", name: "dsh-soul-md", directory: "dsh-soul-md" },
+  { id: "viewport-lock", name: "dsh-viewport-lock", directory: "dsh-viewport-lock" },
+  { id: "offpeak", name: "dsh-offpeak", directory: "dsh-offpeak" },
+];
+
+// Plugins injected from the desktop profile's node_modules into the Android
+// payload. Each entry is copied wholesale (they are local builds not on npm)
+// and registered in the COMPANION_PLUGINS array so companion-sync seeds them
+// into the web-desktop profile on first launch.
+// composer-dynamic-island is already in the EAC deb's assets/plugins; the
+// other four come from the desktop profile.
+const INJECTED_PLUGINS = [
+  { id: "subagent-panel", name: "dsh-subagent-panel", directory: "dsh-subagent-panel", source: "dsh-subagent-panel" },
+  { id: "dsh-custom-provider-reasoning", name: "dsh-custom-provider-reasoning", directory: "dsh-custom-provider-reasoning", source: "dsh-custom-provider-reasoning" },
+  { id: "client-masquerade", name: "dsh-client-masquerade", directory: "dsh-client-masquerade", source: "dsh-client-masquerade" },
+  { id: "session-id-footer", name: "dsh-session-id-footer", directory: "dsh-session-id-footer", source: "dsh-session-id-footer" },
+];
+const INJECTED_PLUGIN_SOURCE_ROOT = "C:\\Users\\sbhui\\.dsh\\profiles\\web-desktop\\node_modules";
 
 function inside(parent, candidate) {
   const relative = path.relative(parent, candidate);
@@ -102,6 +128,94 @@ async function removeMatchingDirectories(parent, predicate) {
       await rm(path.join(parent, entry.name), { recursive: true, force: true });
     }
   }
+}
+
+async function retireVisualPlugins(outputDesktop) {
+  const pluginRoot = path.join(outputDesktop, "assets", "plugins");
+  for (const plugin of RETIRED_BUILTIN_PLUGINS) {
+    await rm(path.join(pluginRoot, plugin.directory), { recursive: true, force: true });
+  }
+  await rm(path.join(outputDesktop, "assets", "skins", "whale-song"), {
+    recursive: true,
+    force: true,
+  });
+
+  // Inject the local plugins from the desktop profile. They must be copied
+  // BEFORE the registry patch below so that the freshly built payload carries
+  // both the code and its registration row.
+  for (const plugin of INJECTED_PLUGINS) {
+    const sourceDir = path.join(INJECTED_PLUGIN_SOURCE_ROOT, plugin.source);
+    await requireDirectory(sourceDir, `injected plugin ${plugin.name}`);
+    const packageJson = JSON.parse(await readFile(path.join(sourceDir, "package.json"), "utf8"));
+    if (packageJson.name !== plugin.name) {
+      throw new Error(`Injected plugin directory/name mismatch: ${sourceDir} has ${packageJson.name}, expected ${plugin.name}`);
+    }
+    await rm(path.join(pluginRoot, plugin.directory), { recursive: true, force: true });
+    await cp(sourceDir, path.join(pluginRoot, plugin.directory), { recursive: true, force: true });
+  }
+
+  const registryPath = path.join(outputDesktop, "lib", "desktop", "companion-sync.js");
+  const registry = await readFile(registryPath, "utf8");
+  const companionStart = registry.indexOf("exports.COMPANION_PLUGINS = [");
+  const companionEnd = registry.indexOf("\n];", companionStart);
+  const retiredStart = registry.indexOf("exports.RETIRED_BUILTIN_PLUGINS = [");
+  const retiredEnd = registry.indexOf("\n];", retiredStart);
+  if (companionStart < 0 || companionEnd < 0 || retiredStart < 0 || retiredEnd < 0) {
+    throw new Error("EAC companion-sync.js has an unexpected plugin registry shape");
+  }
+
+  let updated = registry;
+  const companionSection = registry.slice(companionStart, companionEnd);
+  for (const plugin of RETIRED_BUILTIN_PLUGINS) {
+    const escapedId = plugin.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const entry = new RegExp(`^[ \\t]*\\{ id: ['\"]${escapedId}['\"][^\\n]*\\},?\\r?\\n?`, "mu");
+    if (!entry.test(companionSection)) {
+      throw new Error(`EAC companion registry is missing retired plugin: ${plugin.id}`);
+    }
+    updated = updated.replace(entry, "");
+  }
+
+  // Register the injected plugins: companion-sync copies each entry from
+  // assets/plugins into the profile's node_modules on first launch and seeds
+  // the bundle/patch rows. The injection point is just before the closing
+  // bracket of COMPANION_PLUGINS.
+  const injectRows = INJECTED_PLUGINS.map((plugin) =>
+    `    { id: '${plugin.id}', name: '${plugin.name}', dir: '${plugin.directory}' },`);
+  const companionCloseIndex = updated.indexOf("\n];", companionStart);
+  if (companionCloseIndex < 0) {
+    throw new Error("EAC companion registry lost its closing bracket while injecting plugins");
+  }
+  updated = updated.slice(0, companionCloseIndex) + "\n" + injectRows.join("\n") +
+    updated.slice(companionCloseIndex);
+
+  const refreshedRetiredStart = updated.indexOf("exports.RETIRED_BUILTIN_PLUGINS = [");
+  const refreshedRetiredEnd = updated.indexOf("\n];", refreshedRetiredStart);
+  if (refreshedRetiredStart < 0 || refreshedRetiredEnd < 0) {
+    throw new Error("EAC retired plugin registry was lost while pruning");
+  }
+  const retiredSection = updated.slice(refreshedRetiredStart, refreshedRetiredEnd);
+  const missingRetired = RETIRED_BUILTIN_PLUGINS.filter((plugin) =>
+    !new RegExp(`id: ['\"]${plugin.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['\"]`).test(retiredSection));
+  if (missingRetired.length) {
+    const additions = missingRetired
+      .map((plugin) => `    { id: '${plugin.id}', name: '${plugin.name}' },`)
+      .join("\n");
+    updated = updated.slice(0, refreshedRetiredEnd) + `\n${additions}` + updated.slice(refreshedRetiredEnd);
+  }
+  const dependencyGuard = "if (pkg.dependencies && pkg.dependencies[p.name]) {";
+  const dependencyDelete = "delete pkg.dependencies[p.name];";
+  if (updated.split(dependencyGuard).length !== 2 || updated.split(dependencyDelete).length !== 2) {
+    throw new Error("EAC retired profile dependency cleanup has an unexpected shape");
+  }
+  updated = updated.replace(dependencyGuard, [
+    "const bundles = pkg.dsh?.profile?.bundles;",
+    "            const keptBundles = Array.isArray(bundles) ? bundles.filter(name => name !== p.name) : bundles;",
+    "            const removedBundle = Array.isArray(bundles) && keptBundles.length !== bundles.length;",
+    "            if (removedBundle) pkg.dsh.profile.bundles = keptBundles;",
+    "            if (removedBundle || (pkg.dependencies && pkg.dependencies[p.name])) {",
+  ].join("\n"));
+  updated = updated.replace(dependencyDelete, "if (pkg.dependencies) delete pkg.dependencies[p.name];");
+  await writeFile(registryPath, updated);
 }
 
 async function pruneFiles(root, relative = "") {
@@ -204,6 +318,16 @@ async function validateOutput(outputRoot) {
   for (const file of DESKTOP_OVERLAYS) {
     await requireFile(path.join(desktop, "lib", "desktop", file), `staged overlay ${file}`);
   }
+  // Every injected plugin must survive staging with its package.json intact.
+  for (const plugin of INJECTED_PLUGINS) {
+    const packageRoot = path.join(desktop, "assets", "plugins", plugin.directory);
+    const version = await packageVersion(packageRoot, plugin.name);
+    if (!version) throw new Error(`${plugin.name} has no version in its package.json`);
+  }
+  // composer-dynamic-island stays from the deb payload (it was un-retired).
+  await requireFile(
+    path.join(desktop, "assets", "plugins", "dsh-composer-dynamic-island", "package.json"),
+    "composer-dynamic-island package.json");
   const nodeModules = path.join(desktop, "node_modules");
   for (const [packageName, version] of PACKAGE_VERSIONS) {
     await requirePackageVersion(packageTarget(nodeModules, packageName), packageName, version);
@@ -264,6 +388,7 @@ export async function stageEacAndroidRuntime(options) {
   for (const packageName of ["bare-fs", "bare-path", "bare-url"]) {
     await rm(path.join(outputNodeModules, packageName, "prebuilds"), { recursive: true, force: true });
   }
+  await retireVisualPlugins(outputDesktop);
   await pruneFiles(input.outputRoot);
   await validateOutput(input.outputRoot);
 }

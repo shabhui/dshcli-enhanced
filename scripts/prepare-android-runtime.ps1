@@ -63,9 +63,9 @@ $packages = @(
         Sha256 = '7681fc23e822d7988ba8b2adf3468f93ae68f724dda365cff1385096a9fa87e6'
     },
     @{
-        Name = 'ca-certificates_2026.07.16_all.deb'
-        Path = 'pool/main/c/ca-certificates/ca-certificates_1:2026.07.16_all.deb'
-        Sha256 = '93dc49a8009012c29510081b8f07f30c57af9b10b1dae4f541231d8ee785b37a'
+        Name = 'ca-certificates_2026.08.13_all.deb'
+        Path = 'pool/main/c/ca-certificates/ca-certificates_1:2026.08.13_all.deb'
+        Sha256 = '8e894fb885da738b4ca9a7932703e414d730fa32e78aba33046a747822547d5a'
     },
     @{
         Name = 'libc++_29_aarch64.deb'
@@ -96,6 +96,16 @@ $packages = @(
         Name = 'nodejs-lts_24.18.0-1_aarch64.deb'
         Path = 'pool/main/n/nodejs-lts/nodejs-lts_24.18.0-1_aarch64.deb'
         Sha256 = '490f4d08c45b25a7ea7db6ee466ebb3ee61f07083260b85332704ed018f59a87'
+    },
+    @{
+        Name = 'git_2.55.0_aarch64.deb'
+        Path = 'pool/main/g/git/git_2.55.0_aarch64.deb'
+        Sha256 = '21b16fa06837e5bf94ad257da532c40eb049c120d21f6cb60a6411c0bcee7197'
+    },
+    @{
+        Name = 'libexpat_2.8.4_aarch64.deb'
+        Path = 'pool/main/libe/libexpat/libexpat_2.8.4_aarch64.deb'
+        Sha256 = '71934cf00b404627702034bd1308cb58353dd851d9a2d3ecd9205b4ae6a67a27'
     }
 )
 
@@ -291,17 +301,50 @@ function Assert-RuntimePayload {
         throw "Unable to inspect $termuxArchiveName"
     }
     $normalizedTermuxEntries = $termuxEntries | ForEach-Object { $_ -replace '^\./', '' }
+    # The Windows build cannot store symlinks in the archive, so they travel as
+    # git-symlinks.txt and are replayed on device. Split the requirements into
+    # real files (must be archive entries) and replayed links (must be listed in
+    # the map) — asserting a link as a file entry would always fail here.
     $requiredTermuxEntries = @(
         'bin/node',
+        'bin/git',
+        'git-symlinks.txt',
         'lib/libcares.so',
         'lib/libc++_shared.so',
         'lib/libcrypto.so.3',
+        'lib/libexpat.so.1.12.4',
         'lib/libssl.so.3',
-        'lib/libz.so.1'
+        'lib/libz.so.1.3.2',
+        'libexec/git-core/git-remote-http'
     )
     foreach ($requiredEntry in $requiredTermuxEntries) {
         if ($normalizedTermuxEntries -notcontains $requiredEntry) {
             throw "Bundled Termux runtime entry is missing: $requiredEntry"
+        }
+    }
+    $symlinkMapEntry = $termuxEntries | Where-Object { $_ -match 'git-symlinks\.txt$' } | Select-Object -First 1
+    if (!$symlinkMapEntry) {
+        throw "Bundled Termux runtime is missing the git-symlinks.txt replay map"
+    }
+    $replayMapLines = & $tar -xOf $termuxArchive ($symlinkMapEntry -replace '^\./', '')
+    if ($LASTEXITCODE -ne 0) { throw "Unable to read the symlink replay map" }
+    $replayMap = @{}
+    foreach ($mapLine in $replayMapLines) {
+        if ($mapLine -match '^(.+?)->(.+)$') {
+            $replayMap[$Matches[1]] = $Matches[2]
+        }
+    }
+    if ($replayMap.Count -lt 150) {
+        throw "Symlink replay map is unexpectedly small: $($replayMap.Count) entries"
+    }
+    foreach ($requiredLink in @(
+        'lib/libexpat.so.1',
+        'lib/libz.so.1',
+        'bin/git-receive-pack',
+        'libexec/git-core/git'
+    )) {
+        if (!$replayMap.ContainsKey($requiredLink)) {
+            throw "Bundled Termux runtime symlink is missing from the replay map: $requiredLink"
         }
     }
     $forbiddenTermuxPrefixes = @(
@@ -311,7 +354,10 @@ function Assert-RuntimePayload {
         'lib/cmake/',
         'lib/pkgconfig/',
         'lib/icu/',
-        'share/icu/'
+        'share/icu/',
+        'share/gitweb/',
+        'share/perl5/',
+        'share/git-core/templates/'
     )
     $forbiddenTermuxEntries = @(
         'lib/libicuio.so',
@@ -324,7 +370,8 @@ function Assert-RuntimePayload {
         'lib/libicutu.so.78',
         'lib/libicutu.so.78.3',
         'lib/libsqlite3.53.4.so',
-        'lib/pkgIndex.tcl'
+        'lib/pkgIndex.tcl',
+        'libexec/git-core/git-http-push'
     )
     $nonRuntimeTermuxEntries = $normalizedTermuxEntries | Where-Object {
         $entry = $_
@@ -542,8 +589,10 @@ try {
     # The rolling Termux repo drops old deb revisions (ca-certificates
     # 2026.07.16 is already 404). Only nodejs-lts is consumed when
     # -SkipTermuxRuntime reuses the committed archive (Node headers for the
-    # node-pty build); the other six debs feed the termux prefix build alone
-    # and are skipped. A full rebuild still verifies every package.
+    # node-pty build); the other debs feed the termux prefix build alone
+    # and are skipped. git and libexpat also belong to the termux prefix
+    # payload, so they follow the same split. A full rebuild still verifies
+    # every package.
     $packagesToFetch = if ($SkipTermuxRuntime) {
         $packages | Where-Object { $_.Name -like 'nodejs-lts*' }
     } else {
@@ -751,9 +800,63 @@ try {
             # node resolves through DT_NEEDED). Creating them on Windows needs
             # SeCreateSymbolicLinkPrivilege, so run this from an elevated shell or with
             # Developer Mode on. Pass -SkipTermuxRuntime to reuse the committed archive
-            # when only the Node payload changed.
-            & $tar --strip-components 6 -xf (Join-Path $packageStage 'data.tar.xz') -C $termuxStage
-            if ($LASTEXITCODE -ne 0) { throw "Unable to stage $($package.Name)" }
+            # when only the Node payload changed. The git and libexpat payloads
+            # additionally carry *relative* symlinks (libexec/git-core/git ->
+            # ../../bin/git, libexpat.so -> libexpat.so.1). Without the privilege
+            # bsdtar writes every regular file, fails each link with exit code 1,
+            # and leaves nothing behind for the links; that specific shape is
+            # recoverable — the link map below replays them from the archive
+            # listing — while any other failure still aborts the build.
+            $previousErrorAction = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $stageErrors = & $tar --strip-components 6 -xf (Join-Path $packageStage 'data.tar.xz') -C $termuxStage 2>&1
+            } finally {
+                $ErrorActionPreference = $previousErrorAction
+            }
+            if ($LASTEXITCODE -ne 0) {
+                $unexpected = $stageErrors | Where-Object {
+                    "$_" -notmatch "Can't create '.+': Invalid argument" -and
+                        "$_" -notmatch 'Error exit delayed from previous errors'
+                }
+                if ($unexpected) {
+                    throw "Unable to stage $($package.Name): $($unexpected[0])"
+                }
+                Write-Host "Staged $($package.Name) with symlink entries deferred to the link replay pass."
+            }
+        }
+
+        # Collect every symlink the debs wanted, including the ones bsdtar could
+        # not create. bsdtar -tvf prints "link <path> -> <target>" for symlinks,
+        # with relative targets recorded verbatim. Only links under the prefix
+        # matter; --strip-components 6 removes ./data/data/<package>/files/usr,
+        # so the same six components are dropped from the listing here. Targets
+        # are verified package-free (they are bare or ../-relative in practice)
+        # because a poisoned target would silently create wrong links on device.
+        $prefixStrip = '^\.?/?(data/){1}data/[^/]+/files/usr/'
+        $deferredLinks = @{}
+        foreach ($package in $packages) {
+            $packageStage = Join-Path $temporary "extract-$($package.Name)"
+            $dataTar = Join-Path $packageStage 'data.tar.xz'
+            if (!(Test-Path -LiteralPath $dataTar -PathType Leaf)) { continue }
+            $listing = & $tar -tvf $dataTar
+            foreach ($line in $listing) {
+                # bsdtar -tvf layout: mode owner group size date time "name -> target".
+                # The date column contains localized month names (raw bytes under a
+                # GBK console), so anchor on the "-> target" suffix and take the
+                # path as the whitespace-delimited token immediately before it.
+                if ($line -notmatch '^(l\S*).+?\s(\S+)\s->\s(\S+)$') { continue }
+                $linkPath = $Matches[2] -replace $prefixStrip, ''
+                $linkTarget = $Matches[3]
+                if ([string]::IsNullOrWhiteSpace($linkPath)) { continue }
+                if ($linkPath -match 'com\.termux') {
+                    throw "Symlink path was not stripped of the Termux prefix: $linkPath"
+                }
+                if ($linkTarget -match 'com\.termux') {
+                    throw "Symlink target embeds the legacy Termux prefix: $linkTarget"
+                }
+                $deferredLinks[$linkPath] = $linkTarget
+            }
         }
 
         $runtimeDirectoriesToPrune = @(
@@ -791,6 +894,40 @@ try {
                 Remove-Item -LiteralPath $fileToPrune -Force
             }
         }
+        # git's obsolete webdav transport (git-http-push) is the only consumer of
+        # libexpat in the entire payload, and perl-based subcommands (send-email,
+        # svn, p4, archimport...) have no perl interpreter to run on. Pruning them
+        # keeps the archive lean; everything git needs at runtime (libcurl,
+        # libpcre2, libz, libiconv, libcrypto, libssl) is already bundled.
+        $gitPruneDirs = @(
+            'share\gitweb',
+            'share\perl5',
+            'share\git-core\templates'
+        )
+        foreach ($relativeDirectory in $gitPruneDirs) {
+            $directoryToPrune = Join-Path $termuxStage $relativeDirectory
+            if (Test-Path -LiteralPath $directoryToPrune) {
+                Remove-Item -LiteralPath $directoryToPrune -Recurse -Force
+            }
+        }
+        $gitPruneFiles = @(
+            'libexec\git-core\git-http-push'
+        )
+        foreach ($relativeFile in $gitPruneFiles) {
+            $fileToPrune = Join-Path $termuxStage $relativeFile
+            if (Test-Path -LiteralPath $fileToPrune) {
+                Remove-Item -LiteralPath $fileToPrune -Force
+            }
+        }
+        # Links under pruned directories must not survive into the replay list.
+        foreach ($pruned in (@($runtimeDirectoriesToPrune) + @($runtimeFilesToPrune) + @($gitPruneDirs) + @($gitPruneFiles))) {
+            $prefix = $pruned.Replace('\', '/')
+            foreach ($key in @($deferredLinks.Keys)) {
+                if ($key -eq $prefix -or $key.StartsWith("$prefix/")) {
+                    $deferredLinks.Remove($key)
+                }
+            }
+        }
 
         $relocationCount = 0
         foreach ($file in Get-ChildItem -LiteralPath $termuxStage -Recurse -File) {
@@ -800,6 +937,21 @@ try {
         if ($relocationCount -eq 0) {
             throw 'Official Termux package name was not found in runtime payload'
         }
+
+        # Replay the deferred symlinks into git-symlinks.txt. The staged tree on
+        # Windows cannot hold them (no SeCreateSymbolicLinkPrivilege), so the
+        # archive records each link as "prefix-relative-path->target" and the
+        # on-device installer (install-bundled-runtime.sh) recreates real
+        # symlinks after extraction, where the kernel happily allows them.
+        if ($deferredLinks.Count -gt 0) {
+            $linkList = Join-Path $termuxStage 'git-symlinks.txt'
+            $linkLines = foreach ($entry in ($deferredLinks.GetEnumerator() | Sort-Object Key)) {
+                "$($entry.Key)->$($entry.Value)"
+            }
+            [System.IO.File]::WriteAllText($linkList, ($linkLines -join "`n") + "`n", [System.Text.Encoding]::ASCII)
+            Write-Host "Recorded $($deferredLinks.Count) symlink(s) in git-symlinks.txt for on-device replay."
+        }
+
         Assert-NoLegacyPackageName $termuxStage
 
         if (Test-Path -LiteralPath $termuxArchive) {

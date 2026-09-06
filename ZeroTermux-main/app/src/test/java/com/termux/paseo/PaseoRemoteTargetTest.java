@@ -125,8 +125,8 @@ public class PaseoRemoteTargetTest {
 
         // 两个导航入口都必须走远程判定,否则连着电脑时站内跳转会被 BLOCK 成白屏。
         assertTrue(activity.contains("PaseoNavigationPolicy.decideWithRemote("));
-        assertEquals("handleNavigation 与 handlePopupNavigation 都要走同一个判定",
-            2, countOccurrences(activity, "decideNavigation(url)"));
+        assertEquals("handleNavigation、handlePopupNavigation 和本机桥接守卫都要走同一个判定",
+            3, countOccurrences(activity, "decideNavigation(url)"));
         // decideExact 只剩校验 sidecar 目标那一处,那一处必须留着 ——
         // 它比的是 sidecar 实际绑定的端口,换成会 normalize 的版本就等于改掉事实。
         assertEquals("decideExact 只应出现在校验 sidecar 目标的地方",

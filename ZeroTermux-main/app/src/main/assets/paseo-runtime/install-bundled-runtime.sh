@@ -5,7 +5,7 @@ APP_DIR="$HOME/.paseo-app"
 MARKER="$APP_DIR/runtime-version"
 RUNTIME_DIR="$APP_DIR/runtime"
 PACKAGES_DIR="$RUNTIME_DIR/packages"
-RUNTIME_VERSION="paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.6-arm64-v11"
+RUNTIME_VERSION="paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.6-git-2.55.0-arm64-v12"
 TOYBOX="/system/bin/toybox"
 EAC_ARCHIVE="$PACKAGES_DIR/eac-runtime-arm64.tgz"
 EAC_ROOT="$RUNTIME_DIR/eac"
@@ -255,6 +255,17 @@ if [ "$("$TOYBOX" cat "$MARKER" 2>/dev/null || true)" = "$RUNTIME_VERSION" ] && 
     [ -x "$PREFIX/bin/paseo" ] && \
     [ -x "$PREFIX/bin/npm" ] && \
     [ -x "$PREFIX/bin/pnpm" ] && \
+    [ -x "$PREFIX/bin/git" ] && \
+    [ -x "$PREFIX/bin/apt" ] && \
+    [ -x "$PREFIX/bin/apt-get" ] && \
+    [ -x "$PREFIX/bin/dpkg" ] && \
+    [ -x "$PREFIX/bin/dpkg-deb" ] && \
+    [ -x "$PREFIX/libexec/dsha-runtime/apt" ] && \
+    [ -x "$PREFIX/libexec/dsha-runtime/apt-get" ] && \
+    [ -x "$PREFIX/libexec/dsha-runtime/dpkg" ] && \
+    [ -x "$PREFIX/libexec/dsha-runtime/dpkg-deb" ] && \
+    [ -x "$PREFIX/libexec/dsha-runtime/node" ] && \
+    [ -f "$PREFIX/libexec/dsha-runtime/dsha-dpkg-relocate.js" ] && \
     { [ "$CODEX_STRICT" != "true" ] || [ -x "$PREFIX/bin/codex" ]; }; then
     exit 0
 fi
@@ -277,6 +288,40 @@ trap 'rollback_on_signal 143' TERM
 
 "$TOYBOX" gzip -dc "$PACKAGES_DIR/termux-node-runtime-arm64.tgz" |
     "$TOYBOX" tar -xf - -C "$STAGED_PREFIX"
+
+# Windows tar does not preserve executable bits on staged regular files.
+"$TOYBOX" find "$STAGED_PREFIX/bin" "$STAGED_PREFIX/libexec" -type f \
+    -exec "$TOYBOX" chmod 755 {} \; || exit 1
+
+# Replay the symlinks the Windows build could not store in the archive
+# (bsdtar without SeCreateSymbolicLinkPrivilege skips them). The map is
+# "prefix-relative-path->target", one per line, generated at build time from
+# the original deb listings. Android's kernel happily creates symlinks in the
+# app data directory, so this is the only place they can be materialised.
+SYMLINK_MAP="$STAGED_PREFIX/git-symlinks.txt"
+if [ -f "$SYMLINK_MAP" ]; then
+    while IFS= read -r link_line || [ -n "$link_line" ]; do
+        link_line="$("$TOYBOX" printf '%s' "$link_line" | "$TOYBOX" tr -d '\r')"
+        case "$link_line" in ''|'#'*) continue ;; esac
+        link_path="${link_line%%->*}"
+        link_target="${link_line#*->}"
+        [ -n "$link_path" ] || continue
+        case "$link_path" in
+            /*|*..*) echo "Refusing unsafe symlink path: $link_path" >&2; exit 1 ;;
+        esac
+        case "$link_target" in
+            /*) echo "Refusing absolute symlink target: $link_target" >&2; exit 1 ;;
+        esac
+        "$TOYBOX" mkdir -p "${STAGED_PREFIX}/${link_path%/*}" || exit 1
+        "$TOYBOX" rm -f "$STAGED_PREFIX/$link_path" || exit 1
+        "$TOYBOX" ln -s "$link_target" "$STAGED_PREFIX/$link_path" || {
+            echo "Unable to create runtime symlink: $link_path -> $link_target" >&2
+            exit 1
+        }
+    done < "$SYMLINK_MAP"
+    "$TOYBOX" rm -f "$SYMLINK_MAP" || exit 1
+fi
+
 "$TOYBOX" mkdir -p "$STAGED_PREFIX/lib/node_modules"
 "$TOYBOX" gzip -dc "$PACKAGES_DIR/paseo-node-modules-arm64.tgz" |
     "$TOYBOX" tar -xf - -C "$STAGED_PREFIX/lib"
@@ -289,6 +334,28 @@ STAGED_CODEX_VENDOR="$STAGED_PREFIX/lib/node_modules/@openai/codex-linux-arm64/v
 "$TOYBOX" chmod 755 "$STAGED_CODEX_VENDOR/codex-path/rg"
 "$TOYBOX" chmod 755 "$STAGED_CODEX_VENDOR/codex-resources/bwrap"
 "$TOYBOX" chmod 755 "$STAGED_CODEX_VENDOR/codex-resources/zsh/bin/zsh"
+
+# Bootstrap already relocates the executables; downloaded com.termux debs also
+# need relocation. Stage wrappers and preserved tools before the ownership swap.
+"$TOYBOX" mkdir -p "$STAGED_PREFIX/libexec/dsha-runtime" || exit 1
+# Keep the hook alive while apt removes or switches the public Node package.
+"$TOYBOX" cp "$STAGED_PREFIX/bin/node" "$STAGED_PREFIX/libexec/dsha-runtime/node" || exit 1
+"$TOYBOX" cp "$RUNTIME_DIR/enhanced/scripts/android-dpkg-relocate.cjs" \
+    "$STAGED_PREFIX/libexec/dsha-runtime/dsha-dpkg-relocate.js" || exit 1
+for manager in apt apt-get dpkg dpkg-deb; do
+    real_manager="$PREFIX/bin/$manager"
+    if [ ! -e "$real_manager" ] || "$TOYBOX" grep -q '^# DSHA package relocation wrapper$' "$real_manager" 2>/dev/null; then
+        real_manager="$PREFIX/libexec/dsha-runtime/$manager"
+    fi
+    [ -x "$real_manager" ] || { echo "Missing bootstrap package manager: $manager" >&2; exit 1; }
+    "$TOYBOX" cp "$real_manager" "$STAGED_PREFIX/libexec/dsha-runtime/$manager" || exit 1
+    "$TOYBOX" printf '%s\n' \
+        '#!/system/bin/sh' \
+        '# DSHA package relocation wrapper' \
+        "exec \"$PREFIX/libexec/dsha-runtime/node\" \"$PREFIX/libexec/dsha-runtime/dsha-dpkg-relocate.js\" $manager \"\$@\"" \
+        > "$STAGED_PREFIX/bin/$manager" || exit 1
+    "$TOYBOX" chmod 755 "$STAGED_PREFIX/bin/$manager" "$STAGED_PREFIX/libexec/dsha-runtime/$manager" || exit 1
+done
 
 : > "$NEW_OWNERSHIP"
 append_owned_path() {
@@ -307,6 +374,7 @@ append_directory_units() {
 
 append_directory_units "$STAGED_PREFIX/bin"
 append_directory_units "$STAGED_PREFIX/etc"
+append_directory_units "$STAGED_PREFIX/libexec"
 append_directory_units "$STAGED_PREFIX/share"
 for entry in "$STAGED_PREFIX/lib"/* "$STAGED_PREFIX/lib"/.[!.]* "$STAGED_PREFIX/lib"/..?*; do
     path_exists "$entry" || continue

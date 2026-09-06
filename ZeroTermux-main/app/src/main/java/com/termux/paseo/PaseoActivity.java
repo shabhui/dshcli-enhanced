@@ -164,9 +164,6 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
         renderRemoteButton();
         renderControlState(EacControlState.stopped(getString(R.string.paseo_status_eac_stopped)));
         startRuntime();
-        // 工作区要能落在手机共享存储(文件管理器可见)就得有这个权限;被拒不阻塞任何功能,
-        // 之后用户在 SAF 里选了 /storage 下的目录时会再请求一次。
-        requestStoragePermissionIfNeeded();
     }
 
     private boolean hasStoragePermission() {
@@ -474,6 +471,22 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
         return PaseoNavigationPolicy.decideWithRemote(url, localPort, origin);
     }
 
+    /**
+     * Native Android capabilities are only available to the local Paseo page.
+     *
+     * <p>The same WebView is reused for the optional remote computer connection. A
+     * JavascriptInterface has no origin information of its own, so checking the
+     * current navigation state is the security boundary here.
+     */
+    private boolean isLocalWebViewPage(String url) {
+        if (remoteActive || webView == null || url == null || url.trim().isEmpty()) return false;
+        return decideNavigation(url) == PaseoNavigationPolicy.Decision.ALLOW_LOCAL;
+    }
+
+    private boolean isLocalBridgeAllowed() {
+        return webView != null && isLocalWebViewPage(webView.getUrl());
+    }
+
     private void renderControlState(EacControlState state) {
         controlState = state;
         runState.setText(phaseLabel(state.phase()));
@@ -739,7 +752,10 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
         if (uri != null) detail.append(",uri:").append(org.json.JSONObject.quote(uri));
         detail.append(" }");
         String script = "window.dispatchEvent(new CustomEvent('paseo:directory-picked',{detail:" + detail + "}));";
-        runOnUiThread(() -> webView.evaluateJavascript(script, null));
+        runOnUiThread(() -> {
+            if (!isLocalBridgeAllowed() || webView == null) return;
+            webView.evaluateJavascript(script, null);
+        });
     }
 
     @Override
@@ -810,18 +826,25 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
     private final class PaseoAndroidBridge {
         @JavascriptInterface
         public void pickWorkspaceDirectory() {
-            runOnUiThread(PaseoActivity.this::launchDirectoryPicker);
+            runOnUiThread(() -> {
+                if (isLocalBridgeAllowed()) launchDirectoryPicker();
+            });
         }
 
         @JavascriptInterface
         public void openTermuxTerminal() {
-            Log.i(TAG, "WebView requested native Termux terminal");
-            runOnUiThread(PaseoActivity.this::launchTermuxActivity);
+            runOnUiThread(() -> {
+                if (!isLocalBridgeAllowed()) return;
+                Log.i(TAG, "WebView requested native Termux terminal");
+                launchTermuxActivity();
+            });
         }
 
         @JavascriptInterface
         public void changePaseoPort() {
-            runOnUiThread(PaseoActivity.this::showPortDialog);
+            runOnUiThread(() -> {
+                if (isLocalBridgeAllowed()) showPortDialog();
+            });
         }
     }
 
@@ -965,6 +988,7 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
         @Override
         public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
+            if (!isLocalWebViewPage(url)) return;
             // 插件市场按 navigator.language 选中英文,而那是模块级常量,实测在 2ms 就读完了 ——
             // onPageFinished 已经太晚。语言取自 EAC 自己的 settings.yaml,读不到就不注入。
             // 详见 PaseoLocaleShim。
@@ -976,6 +1000,7 @@ public final class PaseoActivity extends Activity implements PaseoRuntimeControl
         @Override
         public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
+            if (!isLocalWebViewPage(url)) return;
             // EAC 的设置面板在 412px 上会被裁掉两侧、标签也被压没,详见 PaseoMobileCss。
             // 按 id 复用节点,所以首屏和 token 重定向后各注入一次都没有副作用。
             view.evaluateJavascript(PaseoMobileCss.injectionScript(), null);

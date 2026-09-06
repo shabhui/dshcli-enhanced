@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import test from "node:test";
 
 import {
@@ -21,6 +22,34 @@ const DESKTOP_OVERLAYS = [
 ];
 const ALLOWED_NATIVE_BINARY =
   "dsh-desktop/node_modules/node-pty/prebuilds/android-arm64/pty.node";
+const RETIRED_PLUGIN_IDS = [
+  "dsh-pet",
+  "dsh-pet-settings",
+  "dsh-whale-widget",
+  "float-window",
+  "meow-smooth",
+  "skin-switch",
+  "soul-md",
+  "viewport-lock",
+  "offpeak",
+];
+const RETIRED_PLUGIN_DIRS = [
+  "dsh-pet",
+  "dsh-pet-settings",
+  "dsh-whale-widget",
+  "dsh-float-window",
+  "dsh-meow-smooth",
+  "dsh-skin-switch",
+  "dsh-soul-md",
+  "dsh-viewport-lock",
+  "dsh-offpeak",
+];
+const INJECTED_PLUGIN_DIRS = [
+  "dsh-subagent-panel",
+  "dsh-custom-provider-reasoning",
+  "dsh-client-masquerade",
+  "dsh-session-id-footer",
+];
 
 async function put(root, relative, contents = relative) {
   const target = path.join(root, ...relative.split("/"));
@@ -66,6 +95,43 @@ async function fixture() {
   await put(desktop, "vendor/kernel/kernel.tgz");
   await put(desktop, "native/desktop-host.node");
   await put(desktop, "assets/source.map");
+  await put(desktop, "lib/desktop/companion-sync.js", [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    "exports.COMPANION_PLUGINS = [",
+    ...RETIRED_PLUGIN_DIRS.map((directory, index) => {
+      const id = RETIRED_PLUGIN_IDS[index];
+      const name = id === "float-window" ? "@deepseek-ai/dsh-float-window" :
+        id === "skin-switch" ? "@deepseek-ai/dsh-skin-switch" : directory;
+      return `    { id: '${id}', name: '${name}', dir: '${directory}' },`;
+    }),
+    "    { id: 'composer-dynamic-island', name: 'dsh-composer-dynamic-island', dir: 'dsh-composer-dynamic-island' },",
+    "];",
+    "exports.RETIRED_BUILTIN_PLUGINS = [",
+    "];",
+    "function companionPluginsForPlatform() {}",
+    "exports.retireRemovedBuiltinPluginsGated = function(profileDirP) {",
+    "  for (const p of exports.RETIRED_BUILTIN_PLUGINS) {",
+    "    const pkgFile = path.join(profileDirP, 'package.json');",
+    "    const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));",
+    "    if (pkg.dependencies && pkg.dependencies[p.name]) {",
+    "      delete pkg.dependencies[p.name];",
+    "      fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\\n');",
+    "    }",
+    "    fs.rmSync(path.join(profileDirP, 'node_modules', p.name), {recursive:true, force:true});",
+    "  }",
+    "};",
+  ].join("\n"));
+  for (const directory of RETIRED_PLUGIN_DIRS) {
+    await put(desktop, `assets/plugins/${directory}/package.json`,
+      JSON.stringify({ name: directory, version: "0.0.0" }));
+  }
+  // composer-dynamic-island is kept from upstream and must exist in the fixture
+  // source; validateOutput asserts its presence in the staged payload.
+  await put(desktop, "assets/plugins/dsh-composer-dynamic-island/package.json",
+    JSON.stringify({ name: "dsh-composer-dynamic-island", version: "2.1.0" }));
+  await put(desktop, "assets/skins/whale-song/package.json",
+    JSON.stringify({ name: "skin-whale-song", version: "0.0.0" }));
 
   await put(desktop, "node_modules/node-pty/package.json", JSON.stringify({ name: "node-pty" }));
   await put(desktop, "node_modules/node-pty/prebuilds/win32-x64/conpty.node");
@@ -198,6 +264,78 @@ test("removes desktop payloads and leaves only the Android node-pty native binar
     files.filter((file) => /\.(?:exe|dll|pdb|so|node|bare)$/i.test(file)),
     [ALLOWED_NATIVE_BINARY],
   );
+});
+
+test("retires the selected visual plugins from the Android EAC payload and registry", async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+
+  await stageEacAndroidRuntime(stageOptions(f));
+
+  for (const directory of RETIRED_PLUGIN_DIRS) {
+    await assertMissing(path.join(f.outputRoot, "dsh-desktop", "assets", "plugins", directory));
+  }
+  await assertMissing(path.join(f.outputRoot, "dsh-desktop", "assets", "skins", "whale-song"));
+
+  const registry = await readFile(
+    path.join(f.outputRoot, "dsh-desktop", "lib", "desktop", "companion-sync.js"),
+    "utf8",
+  );
+  const companionStart = registry.indexOf("exports.COMPANION_PLUGINS = [");
+  const companionSection = registry.slice(companionStart, registry.indexOf("\n];", companionStart));
+  for (const id of RETIRED_PLUGIN_IDS) {
+    assert.doesNotMatch(companionSection, new RegExp(`id: ['"]${id}['"]`, "u"));
+    assert.match(registry, new RegExp(`id: ['"]${id}['"]`, "u"));
+  }
+  assert.match(registry, /RETIRED_BUILTIN_PLUGINS/u);
+});
+
+test("injects the five selected plugins into the Android EAC payload and registry", async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+
+  await stageEacAndroidRuntime(stageOptions(f));
+
+  const pluginRoot = path.join(f.outputRoot, "dsh-desktop", "assets", "plugins");
+  for (const directory of INJECTED_PLUGIN_DIRS) {
+    const manifestPath = path.join(pluginRoot, directory, "package.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    assert.equal(manifest.name, directory);
+    assert.ok(manifest.version, `${directory} must have a version`);
+  }
+  // composer-dynamic-island stays from the upstream payload and must NOT be retired.
+  const islandManifest = JSON.parse(await readFile(
+    path.join(pluginRoot, "dsh-composer-dynamic-island", "package.json"), "utf8"));
+  assert.equal(islandManifest.name, "dsh-composer-dynamic-island");
+
+  const registry = await readFile(
+    path.join(f.outputRoot, "dsh-desktop", "lib", "desktop", "companion-sync.js"),
+    "utf8",
+  );
+  const companionStart = registry.indexOf("exports.COMPANION_PLUGINS = [");
+  const companionSection = registry.slice(companionStart, registry.indexOf("\n];", companionStart));
+  for (const id of ["subagent-panel", "dsh-custom-provider-reasoning", "client-masquerade",
+    "session-id-footer", "composer-dynamic-island"]) {
+    assert.match(companionSection, new RegExp(`id: ['"]${id}['"]`, "u"));
+  }
+});
+
+test("retirement removes old profile bundle registrations while retaining other bundles", async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+  await stageEacAndroidRuntime(stageOptions(f));
+  const profile = path.join(f.root, "profile");
+  await put(profile, "package.json", JSON.stringify({
+    dependencies: { "meow-smooth": "0.5.0", "keep-plugin": "1.0.0" },
+    dsh: { profile: { bundles: ["meow-smooth", "@deepseek-ai/dsh-skin-switch", "keep-plugin"] } },
+  }));
+  await put(profile, "node_modules/meow-smooth/package.json", "{}");
+  const registry = createRequire(import.meta.url)(path.join(f.outputRoot, "dsh-desktop/lib/desktop/companion-sync.js"));
+  registry.retireRemovedBuiltinPluginsGated(profile);
+  const pkg = JSON.parse(await readFile(path.join(profile, "package.json"), "utf8"));
+  assert.deepEqual(pkg.dsh.profile.bundles, ["keep-plugin"]);
+  assert.deepEqual(pkg.dependencies, { "keep-plugin": "1.0.0" });
+  await assertMissing(path.join(profile, "node_modules/meow-smooth"));
 });
 
 test("rejects an EAC source from a different release", async (t) => {

@@ -11,6 +11,8 @@
   var DEFAULT_PERMISSION = /Android/iu.test(navigator.userAgent) ? "full" : "workspace";
   var root;
   var wakeFloatingToolbar = function () {};
+  var retryPollTimer = null;
+  var retryPollInFlight = false;
   var editorModelIds = [];
   function $(id) { return document.getElementById(id); }
   function esc(value) { return String(value == null ? "" : value).replace(/[&<>"']/gu, function (character) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]; }); }
@@ -19,8 +21,11 @@
     var options = { cache: "no-store", credentials: "same-origin" };
     if (signal) options.signal = signal;
     if (body) { options.method = "POST"; options.headers = { "Content-Type": "application/json" }; options.body = JSON.stringify(body); }
-    var response = await fetch(path, options), payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "请求失败");
+    var response = await fetch(path, options);
+    var payload = null;
+    try { payload = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(payload && payload.error || ("请求失败（HTTP " + response.status + "）"));
+    if (payload === null) throw new Error("服务器返回了无效响应");
     return payload;
   }
   async function codex(body) { return api("/api/codex-config", body); }
@@ -206,7 +211,12 @@
   }
   function waitForOfficialTerminalButton(remaining) {
     if (clickOfficialTerminalButton()) { localStorage.removeItem(PENDING_TERMINAL_KEY); return; }
-    if (remaining <= 0) { localStorage.removeItem(PENDING_TERMINAL_KEY); setStatus("工作区已打开，但原生 Terminal 按钮尚未就绪，请再点一次终端快捷按钮。", "error"); return; }
+    if (remaining <= 0) {
+      clickOfficialTerminalButton.menuRequested = false;
+      localStorage.removeItem(PENDING_TERMINAL_KEY);
+      setStatus("工作区已打开，但原生 Terminal 按钮尚未就绪，请再点一次终端快捷按钮。", "error");
+      return;
+    }
     window.setTimeout(function () { waitForOfficialTerminalButton(remaining - 1); }, 100);
   }
   function resumePendingTerminalOpen() {
@@ -570,7 +580,28 @@
   }
   async function activateProfile(id) { try { state = Object.assign(state, await codex({ action: "activate", id: id })); var profile = state.profiles.find(function (item) { return item.id === id; }); state.activeSupplierId = id; state.supplierProfiles = state.profiles.slice(); closeManagedSupplierEditor(); await syncCodexProfileToComposer(profile, true); renderProfiles(); renderSupplierChoices(); renderSqueeze(); setStatus("已切换到 Agent Codex 的供应商“" + (profile || {}).name + "”，原生输入框将使用对应模型。", "success"); } catch (error) { setStatus(error.message, "error"); } }
   async function toggleSqueeze() { var item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); if (!item) { await loadSwitch(); item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); } if (!item) return; var button = $("pm-squeeze"); button.disabled = true; try { state = Object.assign(state, await codex({ action: "busy-retry-toggle", id: item.id, enabled: !item.busyRetryEnabled })); renderProfiles(); renderSqueeze(); setStatus(state.squeezeEnabled ? "挤入模式已开启：持续请求直到连上或再次关闭。" : "挤入模式已关闭。", "success"); } catch (error) { setStatus(error.message, "error"); } finally { button.disabled = false; } }
-  async function refreshRetryStatus() { try { var result = await codex(); state.retryStatus = result.retryStatus || null; renderSqueeze(); } catch (_) {} }
+  function scheduleRetryStatusPoll(delay) {
+    if (retryPollTimer) window.clearTimeout(retryPollTimer);
+    retryPollTimer = window.setTimeout(function () {
+      retryPollTimer = null;
+      if (document.hidden) { scheduleRetryStatusPoll(15000); return; }
+      refreshRetryStatus();
+    }, delay);
+  }
+  async function refreshRetryStatus() {
+    if (retryPollInFlight) return;
+    retryPollInFlight = true;
+    try {
+      var result = await codex();
+      state.retryStatus = result.retryStatus || null;
+      renderSqueeze();
+      scheduleRetryStatusPoll(state.retryStatus && state.retryStatus.active ? 1200 : 15000);
+    } catch (_) {
+      scheduleRetryStatusPoll(15000);
+    } finally {
+      retryPollInFlight = false;
+    }
+  }
   function openEditor(item) { state.supplierEditorOpen = true; setSupplierEditorMode(true); renderCodexAdvancedApi(); $("pm-editor").hidden = false; $("pm-name").value = item ? item.name : ""; $("pm-url").value = item ? item.baseUrl : ""; $("pm-model").value = item ? item.model || "" : ""; editorModelIds = profileModelIds(item); renderFetchedModels(editorModelIds, item && item.model); $("pm-context-window").value = item && item.contextWindowMaxTokens ? String(item.contextWindowMaxTokens) : ""; $("pm-effort").value = item ? item.reasoningEffort : "medium"; $("pm-permission").value = item ? item.permission : DEFAULT_PERMISSION; $("pm-wire").value = item ? item.wireApi || "responses" : "responses"; $("pm-busy-retry").checked = Boolean(item && item.busyRetryEnabled); $("pm-busy-attempts").value = item && item.busyRetryAttempts || 6; $("pm-busy-retry-delay").value = item && item.busyRetryDelayMs || 300; $("pm-key").value = ""; $("pm-key").classList.add("pm-secret"); $("pm-editor").dataset.id = item ? item.id : ""; $("pm-delete-profile").disabled = !item || state.profiles.length < 2; $("pm-sync-cli").disabled = !item; }
   async function fetchModels() { var button = $("pm-fetch-models"); button.disabled = true; button.textContent = "获取中…"; setStatus("正在获取模型…"); try { var contextWindowMaxTokens = $("pm-context-window").value.trim() ? Number($("pm-context-window").value) : null; var result = await codex({ action: "models", id: $("pm-editor").dataset.id || undefined, name: $("pm-name").value, baseUrl: $("pm-url").value, apiKey: $("pm-key").value, reasoningEffort: $("pm-effort").value, permission: $("pm-permission").value, wireApi: $("pm-wire").value, model: $("pm-model").value, contextWindowMaxTokens: contextWindowMaxTokens }); state = Object.assign(state, result); var ids = normalizeModelIds(result.fetchedModels, $("pm-model").value); editorModelIds = ids; renderFetchedModels(ids, $("pm-model").value); var providerResult = await manager("provider-save", null, { providerId: "codex", additionalModelIds: ids, model: $("pm-model").value.trim() || null, contextWindowMaxTokens: contextWindowMaxTokens }); state.providers = providerResult.providers || state.providers; setStatus("已获取并显示全部 " + ids.length + " 个模型；请选择后会同步到原生输入框。", "success"); } catch (error) { setStatus(error.message, "error"); } finally { button.disabled = false; button.textContent = "获取模型"; } }
   function selectFetchedModel(event) { var model = (event && event.currentTarget ? event.currentTarget.value : $("pm-fetched-models").value).trim(); if (!model) return; $("pm-model").value = model; editorModelIds = normalizeModelIds(editorModelIds, model); setStatus("已选择 " + model + "；点击“保存并启用”后同步到原生输入框。", "success"); }
@@ -949,7 +980,8 @@
     updateCustomCliSourceFields();
     setTab("agent");
     resumePendingTerminalOpen();
-    window.setInterval(function () { if (!document.hidden) refreshRetryStatus(); }, 1200);
+    scheduleRetryStatusPoll(15000);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) scheduleRetryStatusPoll(0); });
     window.setInterval(function () { if (state.tab === "conversations" && !document.hidden) loadConversations(false); }, 10000);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", build, { once: true }); else build();

@@ -56,20 +56,33 @@ public final class PaseoRuntimeController {
     private String currentRunId;
     private int selectedPort = PaseoPortConfig.DEFAULT_PORT;
 
+    // Only file I/O crosses threads; run state and listener callbacks stay on the main looper.
     private final Runnable statusPoll = new Runnable() {
         @Override
         public void run() {
             if (finished) return;
-            PaseoRuntimeState state = readState();
-            if (startupProcess != null && processHasExited(startupProcess) &&
-                state.phase() != PaseoRuntimeState.Phase.ERROR) {
-                state = new PaseoRuntimeState(PaseoRuntimeState.Phase.ERROR,
-                    text(R.string.paseo_status_daemon_stopped, "Paseo daemon stopped unexpectedly"));
-            }
-            dispatch(state);
-            if (state.phase() != PaseoRuntimeState.Phase.ERROR) {
-                handler.postDelayed(this, STATUS_POLL_MS);
-            }
+            final long generation = runGeneration;
+            final Process process = startupProcess;
+            final File currentHome = homeDirectory;
+            final String runId = currentRunId;
+            final String waiting = text(R.string.paseo_status_waiting_runtime, "Waiting for the embedded Paseo runtime");
+            final String installing = text(R.string.paseo_status_installing_runtime, "Installing the embedded Paseo runtime");
+            RUNTIME_INSTALL_EXECUTOR.execute(() -> {
+                PaseoRuntimeState read = readState(currentHome, runId, waiting, installing);
+                handler.post(() -> {
+                    if (finished || generation != runGeneration) return;
+                    PaseoRuntimeState state = read;
+                    if (process != null && processHasExited(process) &&
+                        state.phase() != PaseoRuntimeState.Phase.ERROR) {
+                        state = new PaseoRuntimeState(PaseoRuntimeState.Phase.ERROR,
+                            text(R.string.paseo_status_daemon_stopped, "Paseo daemon stopped unexpectedly"));
+                    }
+                    dispatch(state);
+                    if (isCurrentRun(generation) && state.phase() != PaseoRuntimeState.Phase.ERROR) {
+                        handler.postDelayed(statusPoll, STATUS_POLL_MS);
+                    }
+                });
+            });
         }
     };
 
@@ -186,20 +199,18 @@ public final class PaseoRuntimeController {
         }
     }
 
-    private PaseoRuntimeState readState() {
-        String expectedRunId = currentRunId;
-        String waitingForRuntime = text(R.string.paseo_status_waiting_runtime, "Waiting for the embedded Paseo runtime");
+    private static PaseoRuntimeState readState(File currentHome, String expectedRunId,
+                                               String waitingForRuntime, String installing) {
         if (expectedRunId == null) {
             return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, waitingForRuntime);
         }
-        File currentHome = homeDirectory;
         if (currentHome == null) {
             return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING, waitingForRuntime);
         }
         File statusFile = new File(currentHome, ".paseo-app/status-" + expectedRunId);
         if (!statusFile.isFile()) {
             return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
-                text(R.string.paseo_status_installing_runtime, "Installing the embedded Paseo runtime"));
+                installing);
         }
         StringBuilder contents = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
@@ -212,13 +223,10 @@ public final class PaseoRuntimeController {
             return PaseoRunStatus.parse(expectedRunId, contents.toString());
         } catch (IOException error) {
             return new PaseoRuntimeState(PaseoRuntimeState.Phase.INSTALLING,
-                text(R.string.paseo_status_waiting_embedded_runtime, "Waiting for the embedded runtime"));
+                waitingForRuntime);
         }
     }
 
-    // The status poll and the stop path race: stop() clears `activity` (line 103) while a queued
-    // poll can still call readState(). Fall back to the English literal rather than crash, since a
-    // status string is never worth taking the startup screen down for.
     private String text(int resourceId, String fallback) {
         Activity current = activity;
         if (current == null) return fallback;

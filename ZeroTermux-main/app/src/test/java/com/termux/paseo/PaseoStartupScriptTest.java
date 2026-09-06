@@ -44,7 +44,12 @@ public class PaseoStartupScriptTest {
         assertFalse(installer.contains("npm install"));
         assertTrue(runtimePreparation.contains("termux-node-runtime-arm64.tgz"));
         assertTrue(runtimePreparation.contains("com.dshcli"));
-        assertTrue(script.contains("\"$NODE\" \"$DAEMON_WORKER\" --no-relay --web-ui &"));
+        assertTrue(installer.contains("[ -x \"$PREFIX/bin/git\" ]"));
+        assertTrue(installer.contains("[ -x \"$PREFIX/bin/apt\" ]"));
+        assertTrue(installer.contains("[ -x \"$PREFIX/bin/dpkg\" ]"));
+        assertTrue(installer.contains("android-dpkg-relocate.cjs"));
+        assertTrue(installer.contains("DSHA package relocation wrapper"));
+        assertTrue(script.contains("\n- App package: com.dshcli."));
         assertTrue(script.contains("\"$NODE\" \"$RUNTIME_DIR/enhanced/install.mjs\""));
         assertTrue(script.contains("BUNDLED_FINGERPRINT_FILE=\"$RUNTIME_DIR/asset-fingerprint\""));
         assertTrue(script.contains("ENHANCED_FINGERPRINT="));
@@ -243,7 +248,7 @@ public class PaseoStartupScriptTest {
         assertTrue(runtimePreparation.contains("pool/main/o/openssl/openssl_1:3.6.3_aarch64.deb"));
         assertTrue(runtimePreparation.contains("pool/main/z/zlib/zlib_1.3.2_aarch64.deb"));
         assertTrue(runtimePreparation.contains(
-            "pool/main/c/ca-certificates/ca-certificates_1:2026.07.16_all.deb"));
+            "pool/main/c/ca-certificates/ca-certificates_1:2026.08.13_all.deb"));
         assertTrue(runtimePreparation.contains("lib/libc++_shared.so"));
         assertTrue(runtimePreparation.contains("lib/libcrypto.so.3"));
         assertTrue(runtimePreparation.contains("lib/libssl.so.3"));
@@ -326,8 +331,8 @@ public class PaseoStartupScriptTest {
             Files.readAllBytes(runtimeVersionFile.toPath()), StandardCharsets.UTF_8);
 
         assertTrue(installer.contains(
-            "RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.6-arm64-v11\""));
-        assertTrue(runtimeVersion.contains("runtime-15"));
+            "RUNTIME_VERSION=\"paseo-0.3.1-codex-0.147.0-npm-11.16.0-pnpm-11.7.0-eac-5.3.6-git-2.55.0-arm64-v12\""));
+        assertTrue(runtimeVersion.contains("runtime-16"));
         assertTrue(installer.contains("[ -f \"$RUNTIME_OWNERSHIP\" ]"));
     }
 

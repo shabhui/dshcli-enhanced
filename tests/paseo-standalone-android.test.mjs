@@ -192,9 +192,9 @@ test("Android runtime generation forces existing installs to receive standalone 
 
   assert.match(
     runtimeInstaller,
-    /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-npm-11\.16\.0-pnpm-11\.7\.0-eac-5\.3\.6-arm64-v11"/,
+    /RUNTIME_VERSION="paseo-0\.3\.1-codex-0\.147\.0-npm-11\.16\.0-pnpm-11\.7\.0-eac-5\.3\.6-git-2\.55\.0-arm64-v12"/,
   );
-  assert.match(runtimeVersion, /paseo-enhanced-2\.3\.6-runtime-15/);
+  assert.match(runtimeVersion, /paseo-enhanced-2\.3\.7-runtime-16/);
   assert.match(runtimeInstaller, /\[ -f "\$RUNTIME_OWNERSHIP" \]/u);
 });
 
@@ -275,6 +275,28 @@ test("Android runtime bundles npm and pnpm with device wrappers", async () => {
   assert.match(runtimeInstaller, /\[ -x "\$PREFIX\/bin\/pnpm" \]/u);
 });
 
+test("Android package-manager hooks relocate official Termux debs at install time", async () => {
+  const installer = await source(
+    "ZeroTermux-main/app/src/main/assets/paseo-runtime/install-bundled-runtime.sh",
+  );
+  const relocator = await source("scripts/android-dpkg-relocate.cjs");
+
+  assert.match(installer, /dsha-dpkg-relocate\.js/u);
+  assert.match(installer, /libexec\/dsha-runtime/u);
+  assert.match(installer, /com\.termux/u);
+  assert.match(installer, /com\.dshcli/u);
+  assert.match(installer, /bin\/apt/u);
+  assert.match(installer, /bin\/apt-get/u);
+  assert.match(installer, /bin\/dpkg/u);
+  assert.match(installer, /bin\/dpkg-deb/u);
+  assert.match(relocator, /spawnSync/u);
+  assert.match(relocator, /--raw-extract/u);
+  assert.match(relocator, /--build/u);
+  assert.match(relocator, /Buffer\.from\(['"]com\.termux['"]\)/u);
+  assert.match(installer, /append_directory_units "\$STAGED_PREFIX\/libexec"/u);
+  assert.doesNotMatch(installer, /Package: git/u);
+});
+
 test("runtime assembly pins tar and stays runnable without symlink privilege", async () => {
   const assembler = await source("scripts/prepare-android-runtime.ps1");
 
@@ -309,6 +331,23 @@ test("runtime assembly replaces the manifest instead of truncating a file held b
   assert.match(assembler, /\$manifestTemporary = "\$manifest\.tmp"/u);
   assert.match(assembler, /WriteAllText\(\s*\$manifestTemporary,/u);
   assert.match(assembler, /Move-Item -LiteralPath \$manifestTemporary -Destination \$manifest -Force/u);
+});
+
+test("runtime symlink replay omits all pruned paths and uses LF", async () => {
+  const assembler = await source("scripts/prepare-android-runtime.ps1");
+  assert.match(assembler, /@\(\$runtimeDirectoriesToPrune\).*@\(\$runtimeFilesToPrune\)/u);
+  assert.match(assembler, /WriteAllText\(\$linkList,.*-join "`n"/u);
+});
+
+test("cold start defers the legacy UI stack and storage permission", async () => {
+  const application = await source("ZeroTermux-main/app/src/main/java/com/termux/app/TermuxApplication.java");
+  const activity = await source("ZeroTermux-main/app/src/main/java/com/termux/paseo/PaseoActivity.java");
+  const onCreate = activity.slice(activity.indexOf("protected void onCreate"), activity.indexOf("private boolean hasStoragePermission"));
+  assert.doesNotMatch(onCreate, /requestStoragePermissionIfNeeded/u);
+  assert.match(application, /onActivityPreCreated/u);
+  assert.match(application, /ensureLegacyUiInitialized/u);
+  const appCreate = application.slice(application.indexOf("public void onCreate()"), application.indexOf("public static void setLogConfig"));
+  assert.doesNotMatch(appCreate, /onCreateInit\(\)/u);
 });
 
 test("Android build generates a constant-time runtime asset fingerprint", async () => {

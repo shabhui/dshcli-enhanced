@@ -117,6 +117,17 @@ test("terminal shortcut opens the workspace menu before clicking its terminal it
   assert.equal(clicks.menu, 1);
 });
 
+test("console handles non-JSON HTTP failures and avoids an unconditional retry poll", async () => {
+  const manager = await source("web/paseo-manager.js");
+
+  assert.match(manager, /var payload = null;/u);
+  assert.match(manager, /请求失败（HTTP/u);
+  assert.match(manager, /clickOfficialTerminalButton\.menuRequested = false;/u);
+  assert.match(manager, /function scheduleRetryStatusPoll\(delay\)/u);
+  assert.match(manager, /retryPollInFlight/u);
+  assert.doesNotMatch(manager, /setInterval\(function \(\) \{ if \(!document\.hidden\) refreshRetryStatus\(\)/u);
+});
+
 test("directory navigation uses the canonical parent returned by the server", async () => {
   const manager = await source("web/paseo-manager.js");
 

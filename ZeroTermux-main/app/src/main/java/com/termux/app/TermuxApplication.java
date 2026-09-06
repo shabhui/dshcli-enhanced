@@ -1,17 +1,20 @@
 package com.termux.app;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Looper;
 import android.widget.Toast;
 
 import com.arialyy.aria.core.Aria;
 import com.example.xh_lib.application.XHApplication;
 import com.hjq.permissions.XXPermissions;
-import com.hzy.lib7z.Z7Extractor;
 import com.lzy.okgo.OkGo;
 import com.mallotec.reb.localeplugin.LocaleConstant;
 import com.mallotec.reb.localeplugin.LocalePlugin;
+import com.termux.paseo.PaseoActivity;
 
 import com.termux.shared.errors.Error;
 import com.termux.shared.logger.Logger;
@@ -51,6 +54,7 @@ import okhttp3.OkHttpClient;
 public class TermuxApplication extends XHApplication {
 // @}
     private static final String LOG_TAG = "TermuxApplication";
+    private boolean legacyUiInitialized;
 
     public void onCreate() {
         super.onCreate();
@@ -106,9 +110,28 @@ public class TermuxApplication extends XHApplication {
             TermuxShellEnvironment.writeEnvironmentToFile(this);
         }
 
-        // ZeroTermux add {@
-        onCreateInit();
-        // @}
+        initializeCoreServices();
+        registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
+            @Override
+            public void onActivityPreCreated(Activity activity, Bundle state) {
+                if (!(activity instanceof PaseoActivity)) ensureLegacyUiInitialized();
+            }
+
+            @Override
+            public void onActivityCreated(Activity activity, Bundle state) {
+                // Before API 29 this callback runs from Activity.super.onCreate().
+                if (Build.VERSION.SDK_INT < 29 && !(activity instanceof PaseoActivity)) {
+                    ensureLegacyUiInitialized();
+                }
+            }
+
+            @Override public void onActivityStarted(Activity activity) {}
+            @Override public void onActivityResumed(Activity activity) {}
+            @Override public void onActivityPaused(Activity activity) {}
+            @Override public void onActivityStopped(Activity activity) {}
+            @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) {}
+            @Override public void onActivityDestroyed(Activity activity) {}
+        });
     }
 
     public static void setLogConfig(Context context) {
@@ -136,7 +159,11 @@ public class TermuxApplication extends XHApplication {
         return "are.you.kidding.me.NoExceptionFoundException: This is a bug, please contact developers!";
     }
 
-    private void onCreateInit() {
+    public void ensureLegacyUiInitialized() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            throw new IllegalStateException("Legacy UI initialization requires the main thread");
+        }
+        if (legacyUiInitialized) return;
         FUtils.init(this);
 
         ZFileUUtils.initUUtils(mContext, mHandler);
@@ -144,20 +171,25 @@ public class TermuxApplication extends XHApplication {
         LogUtils.isShow = UserSetManage.Companion.get().getZTUserBean().isOutputLOG();
 
         ZFileManageHelp.getInstance().init(new MyFileImageListener());
-ZFileManageHelp.getInstance().setFileOperateListener(new MyZFileOperateListener());
+        ZFileManageHelp.getInstance().setFileOperateListener(new MyZFileOperateListener());
         ZFileConfiguration.Companion.setMApplicationContext(this);
-        // Z7Extractor.init();
         Aria.init(this);
         Aria.get(this).getDownloadConfig().setMaxSpeed(0);
         Aria.get(this).getDownloadConfig().setConvertSpeed(true);
-        LocalePlugin.INSTANCE.init(this, LocaleConstant.RECREATE_CURRENT_ACTIVITY);
         OkGo.getInstance().init(this);
-        OkHttpClient okHttpClient = OkGo.getInstance().getOkHttpClient();
-
-        okHttpClient.newBuilder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+        OkHttpClient okHttpClient = OkGo.getInstance().getOkHttpClient().newBuilder()
+            .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
             .build();
         OkGo.getInstance().setOkHttpClient(okHttpClient);
+        MainMenuConfig.init(this);
+        new ClipBoardUtil().registerClipEvents();
+        legacyUiInitialized = true;
+        Logger.logDebug(LOG_TAG, "Legacy UI initialized");
+    }
 
+    private void initializeCoreServices() {
+        // Locale callbacks, crash recording and persisted timers apply to every entry point.
+        LocalePlugin.INSTANCE.init(this, LocaleConstant.RECREATE_CURRENT_ACTIVITY);
         XXPermissions.setScopedStorage(true);
         Thread.setDefaultUncaughtExceptionHandler((thread, e) -> {
             ZtCrashHistoryRecorder.record(TermuxApplication.this, thread, e);
@@ -170,18 +202,8 @@ ZFileManageHelp.getInstance().setFileOperateListener(new MyZFileOperateListener(
         //初始化定时器
         LibSuManage.getInstall().initTimer();
         com.termux.zerocore.settings.timer.TimerResumeHelper.tryResumeTimer(this);
-        MainMenuConfig.init(this);
         com.termux.zerocore.workstation.ZtWorkstationLifecycleHelper.register(this);
-        new ClipBoardUtil().registerClipEvents();
-/*        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                BusyBoxManager.INSTANCE.init();
-            }
-        }).start();*/
-		// @}
     }
     /***************************************** ZERO TERMUX END ******************************************/
 
 }
-

@@ -45,9 +45,28 @@ public class PaseoRuntimeControllerTest {
             "src/main/java/com/termux/paseo/PaseoRuntimeController.java").toPath()),
             StandardCharsets.UTF_8);
 
-        assertTrue(source.contains("processHasExited(startupProcess)"));
+        assertTrue(source.contains("processHasExited(process)"));
         assertFalse(source.contains("startupProcess.isAlive()"));
         assertFalse(source.contains("state.phase() != PaseoRuntimeState.Phase.READY &&"));
+        // Health polling must keep running after READY, but the status file reads happen off
+        // the main thread: the poll only schedules work onto the runtime executor.
+        assertTrue(source.contains("RUNTIME_INSTALL_EXECUTOR.execute("));
+        assertTrue(source.contains("handler.postDelayed(statusPoll, STATUS_POLL_MS)"));
+    }
+
+    @Test
+    public void statusPollReadsStateOffTheMainThreadAndDropsStaleGenerations() throws Exception {
+        String source = new String(Files.readAllBytes(new File(
+            "src/main/java/com/termux/paseo/PaseoRuntimeController.java").toPath()),
+            StandardCharsets.UTF_8);
+
+        // The background read must capture the generation snapshot and drop work from a
+        // stopped/restarted run instead of dispatching stale state.
+        int pollStart = source.indexOf("private final Runnable statusPoll");
+        int pollEnd = source.indexOf("};", pollStart);
+        String pollBody = source.substring(pollStart, pollEnd);
+        assertTrue(pollBody.contains("final long generation = runGeneration;"));
+        assertTrue(pollBody.contains("if (finished || generation != runGeneration) return;"));
     }
 
     @Test

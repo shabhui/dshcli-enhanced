@@ -75,17 +75,24 @@ npm install -g @getpaseo/cli@0.3.1
 
 ## Android 客户端
 
-独立 arm64 APK 作为 `v2.3.6` GitHub Release 附件发布；本地构建产物位于
-`android/releases/DSHA-v2.3.6-arm64.apk`，不纳入 Git 跟踪。它已经内置 Termux
-bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.6、内置 Codex CLI 0.147.0、
-npm 11.16.0 / pnpm 11.7.0 和 DeepSeek Harness EAC 5.3.6 桌面壳（dsh 内核 0.1.2-alpha.1
+独立 arm64 APK 作为 `v2.3.7` GitHub Release 附件发布；本地构建产物位于
+`android/releases/DSHA-v2.3.7-arm64.apk`，不纳入 Git 跟踪。它已经内置 Termux
+bootstrap、Node.js 24、Paseo CLI 0.3.1、Paseo Enhanced 2.3.7、内置 Codex CLI 0.147.0、
+git 2.55.0、npm 11.16.0 / pnpm 11.7.0 和 DeepSeek Harness EAC 5.3.6 桌面壳（dsh 内核 0.1.2-alpha.1
 及 Android arm64 原生模块），不需要另外安装 ZeroTermux 或 Termux。首次启动会在应用
 私有目录离线安装这些运行文件，启动 Paseo Daemon，等待 `http://127.0.0.1:6767/` 就绪后
 直接打开 Web UI；EAC 桌面壳由控制页一键引导，同样在应用私有目录运行。最低系统版本为
 Android 7.0（API 24）。
 
-APK SHA-256：
-`9491EA112D21177129FA3E35A3919990B665CB970CF5284BD51C16BA4624B0AF`
+APK 的 SHA-256 随 GitHub Release 提供。此版本沿用 v2.3.6 的 debug 签名。
+
+v2.3.7 在设备端为 apt/dpkg 下载的官方 Termux deb 重定位路径，修复 `pkg install`
+写入 `com.termux` 目录失败；内置 git 可离线使用，后续由包管理器安装时登记完整文件清单。
+Android EAC 包移除选定的 9 个桌宠及外观插件，保留输入灵动岛，并新增五个本地插件：
+子智能体注入面板（dsh-subagent-panel）、第三方模型思考强度调节
+（dsh-custom-provider-reasoning）、客户端伪装（dsh-client-masquerade）、会话 ID 页脚
+（dsh-session-id-footer）与输入灵动岛（dsh-composer-dynamic-island），全部默认可用。
+旧版终端的文件管理和下载库按需初始化，状态文件轮询移到后台，共享存储权限只在选择目录时请求。
 
 Android 工程位于 `ZeroTermux-main/`，离线运行时准备脚本位于
 `scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.dshcli`，可以与原来的
@@ -110,7 +117,7 @@ URL 来源支持为安装和更新分别填写 SHA-256。任意第三方 CLI 仍
 ## 安全说明
 
 - 管理 API 只接受回环地址请求。
-- Android WebView 只允许 `127.0.0.1:6767`，其他导航和明文 HTTP 地址会被阻止。
+- Android WebView 对本机只允许 `127.0.0.1` 上当前配置的 Paseo 端口；远程连接仅允许用户明确连接的完整 origin，其他导航和明文 HTTP 地址会被阻止。本机 Android 桥接与移动端 shim 也只注入本机页面。
 - Android 应用备份已关闭，release 签名信息只从构建进程的环境变量读取。
 - API Key 保存在用户本机的 `~/.paseo/codex-provider-profiles.json`，不会由
   管理接口返回明文。
