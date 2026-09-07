@@ -173,6 +173,13 @@ final class PaseoMobileCss {
             .append("contain-intrinsic-size:auto ").append(MARKET_ROW_HEIGHT_PX)
             .append("px;}");
 
+        // Composer and long chat streams: skip layout/paint for off-screen bubbles.
+        css.append("[data-testid=chat-message],[data-testid=assistant-message],")
+            .append("[data-testid=user-message],.dss-session-item{")
+            .append("content-visibility:auto;contain-intrinsic-size:auto 96px;}");
+        css.append("textarea,[contenteditable=true]{scroll-margin-bottom:96px;}");
+        css.append("[role=dialog],[role=alertdialog]{overscroll-behavior:contain;}");
+
         return css.toString();
     }
 

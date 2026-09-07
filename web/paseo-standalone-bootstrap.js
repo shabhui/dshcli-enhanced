@@ -52,15 +52,29 @@
     replaceActionCopy(document.querySelector('[data-testid="open-project-setup-providers"]'), "管理 Agent", "安装 CLI，添加和切换供应商");
   }
 
+  function isOpenProjectRoute() {
+    return /^\/(?:open-project)(?:\/|$)/.test(window.location.pathname) ||
+      !!document.querySelector('[data-testid="open-project-submit"]');
+  }
+
   function observeStandaloneOpenProject() {
     simplifyStandaloneOpenProject();
-    var scheduled = false;
-    var observer = new MutationObserver(function () {
+    if (!isOpenProjectRoute()) return;
+    var scheduled = false, observer = null, attempts = 0;
+    observer = new MutationObserver(function () {
       if (scheduled) return;
       scheduled = true;
-      window.requestAnimationFrame(function () { scheduled = false; simplifyStandaloneOpenProject(); });
+      window.requestAnimationFrame(function () {
+        scheduled = false;
+        simplifyStandaloneOpenProject();
+        attempts += 1;
+        if (!isOpenProjectRoute() || attempts >= 40) observer.disconnect();
+      });
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    var root = document.querySelector('[data-testid="open-project-submit"]') &&
+      document.querySelector('[data-testid="open-project-submit"]').closest("main,form,section,div") ||
+      document.body;
+    observer.observe(root, { childList: true, subtree: true });
   }
 
   function isAndroidBridgeAvailable() {
@@ -177,6 +191,11 @@
   }
 
   function readStandaloneBootstrap() {
+    var cacheKey = "@paseo:standalone-bootstrap:" + LOCAL_ENDPOINT;
+    try {
+      var cached = JSON.parse(window.localStorage.getItem(cacheKey) || "null");
+      if (cached && cached.serverId && cached.route) return cached;
+    } catch (_) {}
     var request = new XMLHttpRequest();
     request.open("GET", "/api/paseo-manager?action=standalone-bootstrap", false);
     request.setRequestHeader("Accept", "application/json");
@@ -184,7 +203,9 @@
     if (request.status < 200 || request.status >= 300) {
       throw new Error("Standalone bootstrap returned HTTP " + request.status);
     }
-    return JSON.parse(request.responseText || "{}");
+    var payload = JSON.parse(request.responseText || "{}");
+    try { if (payload && payload.serverId && payload.route) window.localStorage.setItem(cacheKey, JSON.stringify(payload)); } catch (_) {}
+    return payload;
   }
 
   function seedOfficialStores(payload) {

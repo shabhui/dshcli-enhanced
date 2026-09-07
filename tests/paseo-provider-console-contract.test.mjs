@@ -126,6 +126,23 @@ test("console handles non-JSON HTTP failures and avoids an unconditional retry p
   assert.match(manager, /function scheduleRetryStatusPoll\(delay\)/u);
   assert.match(manager, /retryPollInFlight/u);
   assert.doesNotMatch(manager, /setInterval\(function \(\) \{ if \(!document\.hidden\) refreshRetryStatus\(\)/u);
+  assert.match(manager, /timeoutMs/u);
+  assert.match(manager, /function closeDrawer\(\)/u);
+  assert.match(manager, /aria-labelledby/u);
+  assert.match(manager, /event\.key === "Escape"/u);
+  assert.match(manager, /distance >= 20/u);
+  assert.match(manager, /overscroll-behavior:contain/u);
+  assert.match(manager, /html\.pm-drawer-open/u);
+});
+
+test("console drawer can close from Escape and the backdrop without reloading Agent state every tap", async () => {
+  const manager = await source("web/paseo-manager.js");
+  const closeSource = manager.match(/function closeDrawer\(\) \{[\s\S]*?\n  \}/u)?.[0] || "";
+  const setTabSource = manager.match(/function setTab\(tab\) \{[\s\S]*?\n  \}/u)?.[0] || "";
+  assert.ok(closeSource, "closeDrawer helper must exist");
+  assert.match(closeSource, /scrollTop = 0/u);
+  assert.match(closeSource, /pm-drawer-open/u);
+  assert.match(setTabSource, /lastSwitchLoadAt > 12000/u);
 });
 
 test("directory navigation uses the canonical parent returned by the server", async () => {
@@ -145,7 +162,8 @@ test("standalone workspace browser opens the private directory panel without a n
   assert.match(manager, /addEventListener\("paseo:open-workspace-browser"/u);
   assert.match(manager, /setTab\("workspace"\)/u);
   assert.match(manager, /loadDirectories\(state\.directory\)/u);
-  assert.match(manager, /pm-backdrop.*classList\.add\("open"\)/u);
+  assert.match(manager, /classList\.add\("open"\)/u);
+  assert.match(manager, /pm-drawer-open/u);
 });
 
 test("collapsed floating controls leave only a real clickable ball", async () => {
@@ -471,7 +489,7 @@ test("squeeze mode is a persistent directly draggable control outside the manage
   assert.match(manager, /if \(!item\) \{ await loadSwitch\(\)/);
   assert.match(manager, /enableFloatingControlDrag/u);
   assert.match(manager, /@paseo:floating-controls/u);
-  assert.match(manager, /if \(!dragging && distance >= 12\)/u);
+  assert.match(manager, /if \(!dragging && distance >= 20\)/u);
   assert.doesNotMatch(manager, /setTimeout\(function \(\) \{ dragging = true/u);
   assert.match(manager, /suppressNextClick/u);
   assert.match(manager, /stopImmediatePropagation/u);
@@ -564,7 +582,7 @@ test("floating actions share one compact directly draggable toolbar", async () =
   assert.match(manager, /toolbar\.appendChild\(openButton\)/u);
   assert.doesNotMatch(manager, /longPressTarget/u);
   assert.doesNotMatch(manager, /setTimeout\(function \(\) \{ dragging = true/u);
-  assert.match(manager, /distance >= 12/u);
+  assert.match(manager, /distance >= 20/u);
   assert.match(manager, /min-width:56px;max-width:96px/u);
   assert.match(manager, /toolbar\.title = "按住拖动工具条"/u);
   assert.match(manager, /@paseo:floating-controls/u);
@@ -643,5 +661,7 @@ test("floating toolbar auto-hides while idle and wakes on pointer or focus", asy
 test("closing the console drawer restarts the floating toolbar idle timer", async () => {
   const manager = await source("web/paseo-manager.js");
 
-  assert.match(manager, /\$\("pm-close"\)\.onclick\s*=\s*function\s*\(\)\s*\{\s*\$\("pm-backdrop"\)\.classList\.remove\("open"\);\s*wakeFloatingToolbar\(\);\s*\}/u);
+  assert.match(manager, /\$\("pm-close"\)\.onclick\s*=\s*closeDrawer/u);
+  assert.match(manager, /function closeDrawer\(\)/u);
+  assert.match(manager, /wakeFloatingToolbar\(\)/u);
 });

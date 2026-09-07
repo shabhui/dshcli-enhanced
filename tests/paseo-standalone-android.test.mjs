@@ -136,6 +136,9 @@ test("standalone open-project actions use compact, direct wording", async () => 
   assert.match(bootstrap, /导入对话/u);
   assert.match(bootstrap, /管理 Agent/u);
   assert.match(bootstrap, /MutationObserver/u);
+  assert.match(bootstrap, /observer\.disconnect\(\)/u);
+  assert.match(bootstrap, /@paseo:standalone-bootstrap:/u);
+  assert.doesNotMatch(bootstrap, /observer\.observe\(document\.documentElement/u);
 });
 
 test("standalone Android keeps local Paseo usable when internet access is offline", async () => {

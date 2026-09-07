@@ -109,6 +109,12 @@ public class PaseoMobileCssTest {
         // hidden 会让内容退出页内搜索与焦点顺序,auto 不会 —— 这里只能是 auto。
         assertFalse("不能用 hidden,那会破坏页内搜索与焦点",
             css.contains("content-visibility:hidden"));
+        assertTrue("长会话气泡也要跳过视口外布局",
+            css.contains("[data-testid=chat-message]"));
+        assertTrue("输入框被键盘顶起后仍要能滚进可视区",
+            css.contains("scroll-margin-bottom:96px"));
+        assertTrue("对话框滚动不能把背景页面一起带走",
+            css.contains("overscroll-behavior:contain"));
     }
 
     @Test

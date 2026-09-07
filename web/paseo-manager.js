@@ -13,22 +13,32 @@
   var wakeFloatingToolbar = function () {};
   var retryPollTimer = null;
   var retryPollInFlight = false;
+  var conversationRenderKey = "";
+  var lastSwitchLoadAt = 0;
   var editorModelIds = [];
   function $(id) { return document.getElementById(id); }
   function esc(value) { return String(value == null ? "" : value).replace(/[&<>"']/gu, function (character) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]; }); }
   function setStatus(text, kind) { var node = $("pm-status"); if (node) { node.textContent = text || ""; node.dataset.kind = kind || ""; } }
-  async function api(path, body, signal) {
+  async function api(path, body, signal, timeoutMs) {
     var options = { cache: "no-store", credentials: "same-origin" };
+    var timeout = null, controller = null;
     if (signal) options.signal = signal;
+    else if (timeoutMs && typeof AbortController === "function") {
+      controller = new AbortController();
+      options.signal = controller.signal;
+      timeout = window.setTimeout(function () { controller.abort(); }, timeoutMs);
+    }
     if (body) { options.method = "POST"; options.headers = { "Content-Type": "application/json" }; options.body = JSON.stringify(body); }
-    var response = await fetch(path, options);
+    try {
+      var response = await fetch(path, options);
     var payload = null;
     try { payload = await response.json(); } catch (_) {}
     if (!response.ok) throw new Error(payload && payload.error || ("请求失败（HTTP " + response.status + "）"));
     if (payload === null) throw new Error("服务器返回了无效响应");
     return payload;
+    } finally { if (timeout) window.clearTimeout(timeout); }
   }
-  async function codex(body) { return api("/api/codex-config", body); }
+  async function codex(body) { return api("/api/codex-config", body, null, 10000); }
   async function manager(action, query, body, signal) {
     var queryText = query ? "?" + new URLSearchParams(Object.assign({ action: action }, query)).toString() : "?action=" + encodeURIComponent(action);
     return body ? api("/api/paseo-manager" + queryText, Object.assign({ action: action }, body), signal) : api("/api/paseo-manager" + queryText, null, signal);
@@ -126,6 +136,15 @@
     } catch (error) { setStatus(error.message, "error"); }
     finally { if (button) button.disabled = false; }
   }
+  function isDrawerOpen() { var backdrop = $("pm-backdrop"); return !!(backdrop && backdrop.classList.contains("open")); }
+  function closeDrawer() {
+    var backdrop = $("pm-backdrop"), drawer = $("pm-drawer"), openButton = $("pm-open");
+    if (backdrop) backdrop.classList.remove("open");
+    if (drawer) drawer.scrollTop = 0;
+    document.documentElement.classList.remove("pm-drawer-open");
+    wakeFloatingToolbar();
+    if (openButton && typeof openButton.focus === "function") window.setTimeout(function () { try { openButton.focus(); } catch (_) {} }, 0);
+  }
   function openFloatingControl(event) {
     var toolbar = $("pm-floating-toolbar");
     if (toolbar && toolbar.classList.contains("pm-floating-toolbar-hidden")) {
@@ -133,7 +152,14 @@
       wakeFloatingToolbar();
       return;
     }
-    $("pm-backdrop").classList.add("open"); setTab(state.tab);
+    var backdrop = $("pm-backdrop"), drawer = $("pm-drawer"), closeButton = $("pm-close");
+    if (backdrop) backdrop.classList.add("open");
+    document.documentElement.classList.add("pm-drawer-open");
+    setTab(state.tab);
+    window.setTimeout(function () {
+      var target = closeButton || (drawer && drawer.querySelector("button,input,select,textarea,[tabindex]"));
+      if (target && typeof target.focus === "function") try { target.focus(); } catch (_) {}
+    }, 0);
   }
   function openNativeTerminal() {
     if (window.PaseoAndroid && typeof window.PaseoAndroid.openTermuxTerminal === "function") {
@@ -188,7 +214,7 @@
   function setTab(tab) {
     state.tab = tab; root.querySelectorAll("[data-pm-tab]").forEach(function (button) { button.classList.toggle("active", button.dataset.pmTab === tab); });
     root.querySelectorAll("[data-pm-panel]").forEach(function (panel) { panel.hidden = panel.dataset.pmPanel !== tab; });
-    if (tab === "agent" || tab === "cli") loadSwitch(); if (tab === "agent") loadGlobalSettings().catch(function (error) { setStatus(error.message, "error"); }); if (tab === "terminal") loadTerminalWorkspaces(); if (tab === "conversations") loadConversations(); if (tab === "mcp") loadMcpSettings().catch(function (error) { setStatus(error.message, "error"); }); if (tab === "workspace") loadDirectories(state.directory); if (tab === "skills") loadSkills(); if (tab === "plugins") loadPlugins();
+    if ((tab === "agent" || tab === "cli") && Date.now() - lastSwitchLoadAt > 12000) loadSwitch(); if (tab === "agent") loadGlobalSettings().catch(function (error) { setStatus(error.message, "error"); }); if (tab === "terminal") loadTerminalWorkspaces(); if (tab === "conversations") loadConversations(); if (tab === "mcp") loadMcpSettings().catch(function (error) { setStatus(error.message, "error"); }); if (tab === "workspace") loadDirectories(state.directory); if (tab === "skills") loadSkills(); if (tab === "plugins") loadPlugins();
   }
   function decodeRoutePart(value) { try { return decodeURIComponent(value); } catch (_) { return value; } }
   function currentWorkspaceRoute() {
@@ -245,7 +271,7 @@
       if (createRoute) window.location.href = createRoute; else setStatus("暂无工作区，请先创建工作区。", "error");
       return;
     }
-    $("pm-backdrop").classList.remove("open");
+    closeDrawer();
     localStorage.setItem(PENDING_TERMINAL_KEY, JSON.stringify({ serverId: target.serverId, workspaceId: target.id, createdAt: Date.now() }));
     if (current && current.serverId === target.serverId && current.workspaceId === target.id) { waitForOfficialTerminalButton(80); return; }
     window.location.href = "/h/" + encodeURIComponent(target.serverId) + "/workspace/" + encodeURIComponent(target.id);
@@ -573,29 +599,30 @@
   }
   async function refreshManagedProvider() { var id = state.managedProviderId; if (!id) return; var button = $("pm-provider-refresh"); button.disabled = true; try { var result = await manager("provider-refresh", null, { providerId: id }); state.providers = result.providers || state.providers; refreshProviderChoices(); $("pm-agent").value = id; renderProviderConfig(state.providers.find(function (item) { return item.id === id; })); setStatus("已刷新 " + id + " 的运行状态。", "success"); } catch (error) { setStatus(error.message, "error"); } finally { button.disabled = false; } }
   async function loadSwitch() {
-    try { var data = await Promise.all([codex(), manager("providers"), manager("provider-cli-catalog")]); state.profiles = data[0].profiles || []; state.activeId = data[0].activeId; state.retryStatus = data[0].retryStatus || state.retryStatus; state.codexModelCatalogValid = data[0].modelCatalogValid === true; state.providers = data[1].providers || []; state.cliCatalog = data[2].catalog || []; renderCliCatalog(); var pref = readComposerPreferences(); var managedProviderId = readManagedProviderPreference(); var preferred = state.providers.find(function (item) { return item.id === managedProviderId; }) || state.providers.find(function (item) { return item.id === pref.provider; }) || state.providers.find(function (item) { return item.available; }) || state.providers[0]; refreshProviderChoices(); if (preferred) { $("pm-agent").value = preferred.id; await selectManagedProvider(preferred.id); } else persistManagedProviderPreference(""); renderProfiles(); renderSqueeze(); var available = state.providers.filter(function (item) { return item.available; }); if (state.tab === "cli" && !available.length) setStatus("暂无可用 CLI，请在此页安装或添加。", "error"); else if (available.length) setStatus("", ""); } catch (error) { setStatus(error.message, "error"); }
+    try { var data = await Promise.all([codex(), manager("providers"), manager("provider-cli-catalog")]); lastSwitchLoadAt = Date.now(); state.profiles = data[0].profiles || []; state.activeId = data[0].activeId; state.retryStatus = data[0].retryStatus || state.retryStatus; state.codexModelCatalogValid = data[0].modelCatalogValid === true; state.providers = data[1].providers || []; state.cliCatalog = data[2].catalog || []; renderCliCatalog(); var pref = readComposerPreferences(); var managedProviderId = readManagedProviderPreference(); var preferred = state.providers.find(function (item) { return item.id === managedProviderId; }) || state.providers.find(function (item) { return item.id === pref.provider; }) || state.providers.find(function (item) { return item.available; }) || state.providers[0]; refreshProviderChoices(); if (preferred) { $("pm-agent").value = preferred.id; await selectManagedProvider(preferred.id); } else persistManagedProviderPreference(""); renderProfiles(); renderSqueeze(); var available = state.providers.filter(function (item) { return item.available; }); if (state.tab === "cli" && !available.length) setStatus("暂无可用 CLI，请在此页安装或添加。", "error"); else if (available.length) setStatus("", ""); } catch (error) { setStatus(error.message, "error"); }
     var activeProfile = state.profiles.find(function (item) { return item.id === state.activeId; });
     var codexProvider = state.providers.find(function (item) { return item.id === "codex"; });
     if (codexProfileNeedsSync(activeProfile, codexProvider)) await syncCodexProfileToComposer(activeProfile, true, false);
   }
   async function activateProfile(id) { try { state = Object.assign(state, await codex({ action: "activate", id: id })); var profile = state.profiles.find(function (item) { return item.id === id; }); state.activeSupplierId = id; state.supplierProfiles = state.profiles.slice(); closeManagedSupplierEditor(); await syncCodexProfileToComposer(profile, true); renderProfiles(); renderSupplierChoices(); renderSqueeze(); setStatus("已切换到 Agent Codex 的供应商“" + (profile || {}).name + "”，原生输入框将使用对应模型。", "success"); } catch (error) { setStatus(error.message, "error"); } }
-  async function toggleSqueeze() { var item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); if (!item) { await loadSwitch(); item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); } if (!item) return; var button = $("pm-squeeze"); button.disabled = true; try { state = Object.assign(state, await codex({ action: "busy-retry-toggle", id: item.id, enabled: !item.busyRetryEnabled })); renderProfiles(); renderSqueeze(); setStatus(state.squeezeEnabled ? "挤入模式已开启：持续请求直到连上或再次关闭。" : "挤入模式已关闭。", "success"); } catch (error) { setStatus(error.message, "error"); } finally { button.disabled = false; } }
+  async function toggleSqueeze() { var item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); if (!item) { await loadSwitch(); item = state.profiles.find(function (profile) { return profile.id === state.activeId; }); } if (!item) return; var button = $("pm-squeeze"); button.disabled = true; try { state = Object.assign(state, await codex({ action: "busy-retry-toggle", id: item.id, enabled: !item.busyRetryEnabled })); renderProfiles(); renderSqueeze(); if (state.retryStatus && state.retryStatus.active) scheduleRetryStatusPoll(0); else { if (retryPollTimer) window.clearTimeout(retryPollTimer); retryPollTimer = null; } setStatus(state.squeezeEnabled ? "挤入模式已开启：持续请求直到连上或再次关闭。" : "挤入模式已关闭。", "success"); } catch (error) { setStatus(error.message, "error"); } finally { button.disabled = false; } }
   function scheduleRetryStatusPoll(delay) {
     if (retryPollTimer) window.clearTimeout(retryPollTimer);
     retryPollTimer = window.setTimeout(function () {
       retryPollTimer = null;
-      if (document.hidden) { scheduleRetryStatusPoll(15000); return; }
+      if (document.hidden) { retryPollTimer = null; return; }
       refreshRetryStatus();
     }, delay);
   }
   async function refreshRetryStatus() {
-    if (retryPollInFlight) return;
+    if (retryPollInFlight) { scheduleRetryStatusPoll(15000); return; }
     retryPollInFlight = true;
     try {
       var result = await codex();
       state.retryStatus = result.retryStatus || null;
       renderSqueeze();
-      scheduleRetryStatusPoll(state.retryStatus && state.retryStatus.active ? 1200 : 15000);
+      if (state.retryStatus && state.retryStatus.active) scheduleRetryStatusPoll(1200);
+      else { retryPollTimer = null; }
     } catch (_) {
       scheduleRetryStatusPoll(15000);
     } finally {
@@ -636,7 +663,7 @@
     if (conversationRequest) return conversationRequest;
     conversationRequest = (async function () {
       try { var data = await manager("conversations"); state.conversations = data.conversations || []; renderConversations(); }
-      catch (error) { setStatus(error.message, "error"); }
+      catch (error) { conversationRequest = null; setStatus(error.message, "error"); }
       finally { conversationRequest = null; }
     })();
     return conversationRequest;
@@ -650,7 +677,12 @@
     }
     catch (error) { setStatus(error.message, "error"); button.disabled = false; button.textContent = "刷新状态"; }
   }
-  function renderConversations() { var list = $("pm-conversations"); list.replaceChildren(); if (!state.conversations.length) { list.innerHTML = "<p class=pm-muted>暂无已导入对话。</p>"; return; } state.conversations.forEach(function (item) { var row = document.createElement("div"); row.className = "pm-row"; var status = conversationStatus(item.status); row.innerHTML = "<div><strong>" + esc(item.title) + "</strong><small>" + esc(item.provider) + " · " + esc(item.cwd) + " · " + formatTime(item.updatedAt) + "</small></div><span class=pm-conversation-status data-status=\"" + esc(String(item.status || "unknown").toLowerCase()) + "\">" + esc(status) + "</span>"; var button = document.createElement("button"); button.className = "pm-danger"; button.type = "button"; button.textContent = "删除"; button.onclick = function () { deleteConversation(item); }; row.appendChild(button); list.appendChild(row); }); }
+  function renderConversations() {
+    var list = $("pm-conversations"); if (!list) return;
+    var key = JSON.stringify((state.conversations || []).map(function (item) { return [item.id, item.status, item.updatedAt, item.title]; }));
+    if (key === conversationRenderKey && list.childElementCount) return;
+    conversationRenderKey = key;
+    list.replaceChildren(); if (!state.conversations.length) { list.innerHTML = "<p class=pm-muted>暂无已导入对话。</p>"; return; } state.conversations.forEach(function (item) { var row = document.createElement("div"); row.className = "pm-row"; var status = conversationStatus(item.status); row.innerHTML = "<div><strong>" + esc(item.title) + "</strong><small>" + esc(item.provider) + " · " + esc(item.cwd) + " · " + formatTime(item.updatedAt) + "</small></div><span class=pm-conversation-status data-status=\"" + esc(String(item.status || "unknown").toLowerCase()) + "\">" + esc(status) + "</span>"; var button = document.createElement("button"); button.className = "pm-danger"; button.type = "button"; button.textContent = "删除"; button.onclick = function () { deleteConversation(item); }; row.appendChild(button); list.appendChild(row); }); }
   function renderImportableConversations() { var list = $("pm-importable"); if (!list) return; list.replaceChildren(); if (!state.importableEntries.length) { list.innerHTML = "<p class=pm-muted>暂时没有可导入对话。</p>"; return; } state.importableEntries.forEach(function (item) { var row = document.createElement("div"); row.className = "pm-row"; row.innerHTML = "<div><strong>" + esc(item.title || item.firstPromptPreview || "未命名对话") + "</strong><small>" + esc(item.providerLabel || item.providerId) + " · " + esc(item.cwd) + " · " + formatTime(item.lastActivityAt) + "</small></div>"; var button = document.createElement("button"); button.className = "pm-primary"; button.type = "button"; button.textContent = "导入"; button.onclick = function () { importConversation(item, button); }; row.appendChild(button); list.appendChild(row); }); }
   async function importConversation(item, button) { button.disabled = true; button.textContent = "导入中…"; try { await manager("conversation-import", null, { providerId: item.providerId, providerHandleId: item.providerHandleId, cwd: item.cwd }); setStatus("对话已导入。", "success"); await loadConversations(true); } catch (error) { setStatus(error.message, "error"); button.disabled = false; button.textContent = "导入"; } }
   async function deleteConversation(item) { if (!confirm("删除对话“" + item.title + "”？此操作会移除 Paseo 记录。")) return; try { await manager("conversation-delete", null, { id: item.id }); setStatus("对话已删除，正在刷新列表。", "success"); await loadConversations(); } catch (error) { setStatus(error.message, "error"); } }
@@ -744,7 +776,7 @@
     dragTarget.addEventListener("pointermove", function (event) {
       if (!start || event.pointerId !== pointerId) return;
       var distance = Math.hypot(event.clientX - start.x, event.clientY - start.y);
-      if (!dragging && distance >= 12) { dragging = true; suppressNextClick = true; root.classList.add("pm-dragging"); dragTarget.setPointerCapture?.(event.pointerId); }
+      if (!dragging && distance >= 20) { dragging = true; suppressNextClick = true; root.classList.add("pm-dragging"); dragTarget.setPointerCapture?.(event.pointerId); }
       if (!dragging) return;
       var left = Math.max(0, Math.min(window.innerWidth - root.offsetWidth, origin.left + event.clientX - start.x));
       var top = Math.max(0, Math.min(window.innerHeight - root.offsetHeight, origin.top + event.clientY - start.y));
@@ -754,7 +786,7 @@
     dragTarget.addEventListener("pointerup", finish); dragTarget.addEventListener("pointercancel", finish);
   }
   function build() {
-    var style = document.createElement("style"); style.textContent = "#paseo-codex-settings{display:none!important}#paseo-manager{position:fixed;left:12px;bottom:max(14px,env(safe-area-inset-bottom));z-index:2147483000;display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-family:Inter,system-ui,-apple-system,'PingFang SC',sans-serif;color:#f3f5f3}#pm-open{border:1px solid #45534c;border-radius:999px;background:#1d2722;color:#f3f5f3;min-height:44px;padding:0 17px;box-shadow:0 8px 28px #0007;font-weight:700}#pm-backdrop{display:none;position:fixed;inset:0;background:#0009;align-items:flex-end;justify-content:center;padding:0}#pm-backdrop.open{display:flex}#pm-drawer{width:min(720px,100%);max-height:min(92vh,var(--paseo-viewport-height,92dvh));overflow:auto;background:#1e2521;border:1px solid #46534c;border-bottom:0;border-radius:16px 16px 0 0;padding:14px 16px max(18px,env(safe-area-inset-bottom));box-sizing:border-box}#pm-head{display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:-14px;background:#1e2521;padding:4px 0 12px;z-index:1}#pm-head h2{margin:0;font-size:18px}#pm-close,.pm-icon{border:0;background:transparent;color:#c8d0cb;font-size:22px;padding:7px}#pm-tabs{display:flex;gap:6px;overflow:auto;margin-bottom:14px;position:sticky;top:42px;background:#1e2521;padding:4px 0;z-index:1}#pm-tabs button{flex:0 0 auto;border:1px solid #435048;border-radius:999px;background:#29322e;color:#d5ddd8;padding:8px 12px}#pm-tabs button.active{background:#38a269;color:#08170d;border-color:#38a269;font-weight:700}.pm-panel{display:grid;gap:12px}.pm-panel[hidden]{display:none}.pm-muted,.pm-help{color:#aab5ae;font-size:12px;line-height:18px;margin:0}.pm-status{min-height:20px;color:#aab5ae;font-size:13px}.pm-status[data-kind=success]{color:#68d39a}.pm-status[data-kind=error]{color:#ff938b}.pm-select,.pm-input{width:100%;min-height:43px;border:1px solid #45534c;border-radius:9px;background:#141a17;color:#f3f5f3;padding:0 11px;box-sizing:border-box;font:inherit}.pm-secret{-webkit-text-security:disc}.pm-actions{display:flex;gap:8px;flex-wrap:wrap}.pm-actions button,.pm-secondary,.pm-danger,.pm-primary{min-height:40px;border:1px solid #45534c;border-radius:8px;background:#2a342f;color:#f3f5f3;padding:0 12px}.pm-primary{background:#38a269;color:#08170d;border-color:#38a269;font-weight:700}.pm-danger{color:#ff938b;border-color:#754540;background:transparent}.pm-provider{display:grid;text-align:left;gap:3px;border:1px solid #45534c;border-radius:10px;background:#29322e;color:#f3f5f3;padding:11px}.pm-provider.active{border-color:#54d18f;background:#203d2d}.pm-provider small,.pm-row small{display:block;color:#aab5ae;font-size:11px;line-height:16px}.pm-list{display:grid;gap:8px}.pm-row{display:flex;align-items:center;gap:8px;justify-content:space-between;border:1px solid #3c4841;border-radius:10px;background:#252e29;padding:10px}.pm-row>div{min-width:0;flex:1}.pm-row strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}.pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.pm-grid>label{display:grid;gap:5px;font-size:12px;color:#c6d0c9}.pm-chip{border:1px solid #45534c;border-radius:999px;background:#29322e;color:#dce4df;padding:8px 11px}.pm-roots{display:flex;gap:6px;flex-wrap:wrap}.pm-dirpath{font-size:12px;word-break:break-all;color:#aab5ae}.pm-directories{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:7px}.pm-directory{display:flex;align-items:center;gap:7px;border:1px solid #3c4841;border-radius:8px;background:#252e29;color:#f3f5f3;text-align:left;padding:11px;min-height:43px}.pm-directory span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-workspace{width:100%;text-align:left}.pm-badge{font-size:11px;color:#68d39a}@media(max-width:520px){#pm-drawer{padding-left:12px;padding-right:12px}.pm-grid{grid-template-columns:1fr}.pm-row{align-items:flex-start;flex-wrap:wrap}.pm-row>button{flex:1}.pm-profiles{grid-template-columns:1fr 1fr}}"; document.head.appendChild(style);
+    var style = document.createElement("style"); style.textContent = "#paseo-codex-settings{display:none!important}#paseo-manager{position:fixed;left:12px;bottom:max(14px,env(safe-area-inset-bottom));z-index:2147483000;display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-family:Inter,system-ui,-apple-system,'PingFang SC',sans-serif;color:#f3f5f3}#pm-open{border:1px solid #45534c;border-radius:999px;background:#1d2722;color:#f3f5f3;min-height:44px;padding:0 17px;box-shadow:0 8px 28px #0007;font-weight:700}#pm-backdrop{display:none;position:fixed;inset:0;background:#0009;align-items:flex-end;justify-content:center;padding:0;overscroll-behavior:contain}#pm-backdrop.open{display:flex}html.pm-drawer-open{overflow:hidden}#pm-drawer{width:min(720px,100%);max-height:min(92vh,var(--paseo-viewport-height,92dvh));overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;background:#1e2521;border:1px solid #46534c;border-bottom:0;border-radius:16px 16px 0 0;padding:14px 16px max(18px,env(safe-area-inset-bottom));box-sizing:border-box}#pm-head{display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:-14px;background:#1e2521;padding:4px 0 12px;z-index:1}#pm-head h2{margin:0;font-size:18px}#pm-close,.pm-icon{border:0;background:transparent;color:#c8d0cb;font-size:22px;padding:7px}#pm-tabs{display:flex;gap:6px;overflow:auto;margin-bottom:14px;position:sticky;top:42px;background:#1e2521;padding:4px 0;z-index:1}#pm-tabs button{flex:0 0 auto;border:1px solid #435048;border-radius:999px;background:#29322e;color:#d5ddd8;padding:8px 12px}#pm-tabs button.active{background:#38a269;color:#08170d;border-color:#38a269;font-weight:700}.pm-panel{display:grid;gap:12px}.pm-panel[hidden]{display:none}.pm-muted,.pm-help{color:#aab5ae;font-size:12px;line-height:18px;margin:0}.pm-status{min-height:20px;color:#aab5ae;font-size:13px}.pm-status[data-kind=success]{color:#68d39a}.pm-status[data-kind=error]{color:#ff938b}.pm-select,.pm-input{width:100%;min-height:43px;border:1px solid #45534c;border-radius:9px;background:#141a17;color:#f3f5f3;padding:0 11px;box-sizing:border-box;font:inherit}.pm-secret{-webkit-text-security:disc}.pm-actions{display:flex;gap:8px;flex-wrap:wrap}.pm-actions button,.pm-secondary,.pm-danger,.pm-primary{min-height:40px;border:1px solid #45534c;border-radius:8px;background:#2a342f;color:#f3f5f3;padding:0 12px}.pm-primary{background:#38a269;color:#08170d;border-color:#38a269;font-weight:700}.pm-danger{color:#ff938b;border-color:#754540;background:transparent}.pm-provider{display:grid;text-align:left;gap:3px;border:1px solid #45534c;border-radius:10px;background:#29322e;color:#f3f5f3;padding:11px}.pm-provider.active{border-color:#54d18f;background:#203d2d}.pm-provider small,.pm-row small{display:block;color:#aab5ae;font-size:11px;line-height:16px}.pm-list{display:grid;gap:8px}.pm-row{display:flex;align-items:center;gap:8px;justify-content:space-between;border:1px solid #3c4841;border-radius:10px;background:#252e29;padding:10px}.pm-row>div{min-width:0;flex:1}.pm-row strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}.pm-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.pm-grid>label{display:grid;gap:5px;font-size:12px;color:#c6d0c9}.pm-chip{border:1px solid #45534c;border-radius:999px;background:#29322e;color:#dce4df;padding:8px 11px}.pm-roots{display:flex;gap:6px;flex-wrap:wrap}.pm-dirpath{font-size:12px;word-break:break-all;color:#aab5ae}.pm-directories{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:7px}.pm-directory{display:flex;align-items:center;gap:7px;border:1px solid #3c4841;border-radius:8px;background:#252e29;color:#f3f5f3;text-align:left;padding:11px;min-height:43px}.pm-directory span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-workspace{width:100%;text-align:left}.pm-badge{font-size:11px;color:#68d39a}@media(max-width:520px){#pm-drawer{padding-left:12px;padding-right:12px}.pm-grid{grid-template-columns:1fr}.pm-row{align-items:flex-start;flex-wrap:wrap}.pm-row>button{flex:1}.pm-profiles{grid-template-columns:1fr 1fr}}"; document.head.appendChild(style);
     var mobileOverride = document.createElement("style"); mobileOverride.textContent = "#paseo-manager{left:auto;right:0;top:calc(50% - 23px);bottom:auto;pointer-events:none}#pm-open{pointer-events:auto;min-height:46px;height:46px;padding:0;font-size:15px;opacity:.68}#pm-open:active{opacity:1}html.paseo-keyboard-open #pm-open{display:none}#pm-backdrop{z-index:2147483001}#pm-drawer{max-height:min(88vh,var(--paseo-viewport-height,88dvh));padding-bottom:max(18px,env(safe-area-inset-bottom),var(--paseo-keyboard-inset,0px))}.pm-model-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px}.pm-model-row .pm-secondary{min-height:43px;white-space:nowrap}.pm-toggle{display:flex!important;align-items:center;grid-template-columns:none!important;gap:9px!important;min-height:43px}.pm-toggle input{width:19px;height:19px;accent-color:#38a269;flex:none}.pm-toggle span{line-height:18px}"; document.head.appendChild(mobileOverride);
     var squeezeStyle = document.createElement("style"); squeezeStyle.textContent = "#pm-squeeze{order:-1;pointer-events:auto;min-width:56px;max-width:96px;min-height:32px;height:32px;margin:0 2px;padding:0 6px;border:1px solid #45534c;border-radius:6px;background:#29322e;color:#d5ddd8;font-size:11px;box-shadow:0 6px 18px #0006;opacity:.92;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#pm-squeeze.on{background:#38a269;border-color:#54d18f;color:#08170d;font-weight:700}#pm-squeeze:disabled{opacity:.5}.pm-retry-status{margin:0;padding:8px 9px;border:1px solid #4c5d52;border-radius:7px;background:#101612;color:#cbd5ce;font:12px/18px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.pm-retry-status[hidden]{display:none}#pm-custom-cli-form{display:grid;gap:10px}#pm-custom-cli-form>h4{margin:4px 0 0;font-size:14px}#pm-custom-cli-form>label,.pm-advanced-fields>label{display:grid;gap:5px;font-size:12px;color:#c6d0c9}#pm-custom-cli-advanced{border:0;border-top:1px solid #2b3930;padding-top:8px}#pm-custom-cli-advanced>summary{cursor:pointer;color:#aab5ae;font-size:12px;padding:6px 0}#pm-custom-cli-advanced[open]>summary{color:#d5ddd8}.pm-advanced-fields{display:grid;gap:9px;padding-top:8px}#pm-custom-cli-scripts-row[hidden]{display:none!important}#pm-backdrop,#pm-drawer,#pm-backdrop button,#pm-backdrop input,#pm-backdrop textarea,#pm-backdrop select{pointer-events:auto}.pm-global-settings{display:grid;gap:8px;margin-top:8px;padding-top:10px;border-top:1px solid #2b3930}.pm-global-settings textarea{min-height:112px;resize:vertical}.pm-global-settings .pm-status{min-height:0}.pm-base-prompt[hidden]{display:none}.pm-base-prompt>summary{cursor:pointer;color:#aab5ae;font-size:12px;padding:6px 0}.pm-base-prompt[open]>summary{color:#d5ddd8}.pm-base-prompt-text{margin:6px 0 0;padding:9px 10px;max-height:240px;overflow:auto;border:1px solid #2b3930;border-radius:7px;background:#101612;color:#cbd5ce;font:12px/18px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}"; document.head.appendChild(squeezeStyle);
     var compactStyle = document.createElement("style"); compactStyle.textContent = "#pm-open{width:26px;min-width:26px;height:46px;min-height:46px;padding:0;border-radius:7px 0 0 7px;font-size:15px;line-height:1;background:#17211c;border-color:#52675a;border-right:0;opacity:.68}#pm-open:hover,#pm-open:focus-visible{opacity:1}#pm-squeeze{margin:0 4px 0 auto;box-shadow:none;border-radius:7px;min-height:32px;height:32px}#pm-backdrop{background:rgba(7,10,8,.72)}#pm-drawer{background:#151b18;border-color:#3a4a40;border-radius:12px 12px 0 0;padding:12px 14px max(16px,env(safe-area-inset-bottom));box-shadow:0 -12px 40px rgba(0,0,0,.35)}#pm-head{top:-12px;background:#151b18;border-bottom:1px solid #2c3931;padding:2px 0 10px}#pm-head h2{font-size:16px;letter-spacing:.01em}#pm-close{order:3}#pm-tabs{top:41px;gap:4px;margin:0 0 12px;padding:4px;background:#101512;border:1px solid #27352d;border-radius:8px}#pm-tabs button{border:0;border-radius:6px;background:transparent;padding:8px 7px;color:#9eaca2;font-size:12px}#pm-tabs button.active{background:#2f9b63;color:#07140b}#pm-status{min-height:18px;padding:0 2px;font-size:12px}.pm-panel{gap:10px}.pm-help{padding:7px 9px;border-left:2px solid #3d9e69;background:#1c2620;border-radius:5px}.pm-actions{gap:6px}.pm-control{display:grid;flex:1 1 140px;gap:5px;min-width:0;color:#aab5ae;font-size:11px}.pm-control .pm-select{min-height:38px}.pm-actions button,.pm-secondary,.pm-danger,.pm-primary{min-height:38px;border-radius:7px;font-size:12px}.pm-provider{min-height:56px;border-radius:8px;background:#1c2620;border-color:#2f4035;padding:9px 10px}.pm-provider.active{background:#203f2c;border-color:#4bc783;box-shadow:inset 3px 0 #4bc783}.pm-provider small,.pm-row small{font-size:10px;color:#8f9f94}.pm-row{border-radius:7px;background:#1a231e;border-color:#2b3930;padding:9px}.pm-row .pm-conversation-status{flex:none;padding:3px 6px;border-radius:5px;background:#25372b;color:#aab5ae;font-size:11px;white-space:nowrap}.pm-row .pm-conversation-status[data-status*=run],.pm-row .pm-conversation-status[data-status*=active],.pm-row .pm-conversation-status[data-status*=work]{color:#77dda1;background:#1e402d}.pm-row .pm-conversation-status[data-status*=complete],.pm-row .pm-conversation-status[data-status*=done],.pm-row .pm-conversation-status[data-status*=success]{color:#77dda1}.pm-row .pm-conversation-status[data-status*=error],.pm-row .pm-conversation-status[data-status*=fail]{color:#ff9c94;background:#452b29}.pm-select,.pm-input{min-height:40px;border-radius:7px;background:#101612;border-color:#34463a;font-size:13px}.pm-grid{gap:8px}.pm-directories{gap:6px}.pm-directory{border-radius:7px;background:#1a231e;border-color:#2b3930;padding:9px}.pm-chip{border-radius:6px;padding:7px 9px;background:#1c2921}.pm-badge{font-size:10px}@media(min-width:700px){#pm-backdrop{align-items:stretch;justify-content:flex-end;padding:0}#pm-drawer{width:430px;height:100%;max-height:none;border-radius:0;border-width:0 0 0 1px;padding-top:16px}#pm-tabs{display:grid;grid-template-columns:repeat(7,1fr)}#pm-head{top:-16px}}@media(max-width:520px){#pm-drawer{max-height:min(84dvh,var(--paseo-viewport-height,84dvh));padding-left:11px;padding-right:11px}.pm-profiles{grid-template-columns:1fr 1fr}.pm-row>button{flex:0 0 auto}}"; document.head.appendChild(compactStyle);
@@ -967,11 +999,22 @@
     terminalShortcut.onclick = function (event) { event.preventDefault(); event.stopPropagation(); openNativeTerminal(); };
     squeezeButton.onclick = toggleSqueeze;
     openButton.onclick = openFloatingControl;
-    $("pm-close").onclick = function () { $("pm-backdrop").classList.remove("open"); wakeFloatingToolbar(); };
+    $("pm-close").onclick = closeDrawer;
+    $("pm-close").setAttribute("aria-label", "关闭控制台");
+    $("pm-drawer").setAttribute("aria-labelledby", "pm-head");
+    $("pm-backdrop").addEventListener("click", function (event) { if (event.target === event.currentTarget) closeDrawer(); });
+    document.addEventListener("keydown", function (event) { if (event.key === "Escape" && isDrawerOpen()) { event.preventDefault(); closeDrawer(); } });
     root.querySelectorAll("[data-pm-tab]").forEach(function (button) { button.onclick = function () { setTab(button.dataset.pmTab); }; });
     $("pm-save-agent").onclick = saveAgentPreference; $("pm-agent").addEventListener("change", function () { selectManagedProvider(this.value); }); $("pm-supplier").addEventListener("change", function () { selectManagedSupplier(this.value); }); $("pm-add-supplier").onclick = newManagedSupplier; $("pm-edit-supplier").onclick = editManagedSupplier; $("pm-delete-supplier").onclick = deleteManagedSupplier; $("pm-cancel-provider-editor").onclick = closeManagedSupplierEditor; $("pm-new-profile").onclick = function () { newManagedSupplier(); }; $("pm-edit-profile").onclick = function () { editManagedSupplier(); }; $("pm-editor").onsubmit = saveProfile; $("pm-cancel-editor").onclick = closeManagedSupplierEditor; $("pm-delete-profile").onclick = deleteProfile; $("pm-sync-cli").onclick = syncProfileToCli; $("pm-fetch-models").onclick = fetchModels; $("pm-fetched-models").addEventListener("change", selectFetchedModel); $("pm-provider-fetch-models").onclick = fetchManagedProviderModels; $("pm-provider-fetched-models").addEventListener("change", selectManagedProviderModel); $("pm-provider-editor").onsubmit = saveManagedProvider; $("pm-provider-refresh").onclick = refreshManagedProvider; $("pm-new-profile").textContent = "新增供应商"; $("pm-edit-profile").textContent = "编辑供应商";
     $("pm-open-terminal").onclick = openTerminal; $("pm-terminal-refresh").onclick = loadTerminalWorkspaces; $("pm-save-global-system-prompt").onclick = saveGlobalSettings; $("pm-save-mcp").onclick = saveMcpSettings; $("pm-change-port").onclick = function () { if (window.PaseoAndroid && typeof window.PaseoAndroid.changePaseoPort === "function") window.PaseoAndroid.changePaseoPort(); else setStatus("当前环境无法更改 Paseo 端口。", "error"); };
-    window.addEventListener("paseo:open-workspace-browser", function () { $("pm-backdrop").classList.add("open"); state.directoryPurpose = null; setTab("workspace"); loadDirectories(state.directory || undefined); });
+    window.addEventListener("paseo:open-workspace-browser", function () {
+      var backdrop = $("pm-backdrop");
+      if (backdrop) backdrop.classList.add("open");
+      document.documentElement.classList.add("pm-drawer-open");
+      state.directoryPurpose = null;
+      setTab("workspace");
+      loadDirectories(state.directory || undefined);
+    });
     $("pm-key").addEventListener("focus", function () { this.classList.add("pm-secret"); }); $("pm-key").addEventListener("dblclick", function () { this.classList.toggle("pm-secret"); });
     $("pm-import-all").onclick = importAll; $("pm-refresh-conv").onclick = manualRefreshStatus; $("pm-dir-up").onclick = function () { if (state.directoryParent) loadDirectories(state.directoryParent); }; $("pm-use-dir").onclick = useDirectory;
     $("pm-skill-browse").onclick = function () { state.directoryPurpose = "skill"; setTab("workspace"); }; $("pm-plugin-browse").onclick = function () { state.directoryPurpose = "plugin"; setTab("workspace"); }; $("pm-skill-import").onclick = function () { state.directoryPurpose = null; manager("skill-import", null, { path: $("pm-skill-path").value, target: state.skillTarget }).then(function (result) { state.skills = result.skills || state.skills; renderSkills(); setStatus("Skill 已导入到" + (state.skillTarget === "codex" ? " Codex" : state.skillTarget === "claude" ? " Claude" : "通用") + "目录。", "success"); }).catch(function (e) { setStatus(e.message, "error"); }); }; $("pm-plugin-import").onclick = function () { state.directoryPurpose = null; manager("plugin-import", null, { path: $("pm-plugin-path").value }).then(loadPlugins).catch(function (e) { setStatus(e.message, "error"); }); };
@@ -981,7 +1024,7 @@
     setTab("agent");
     resumePendingTerminalOpen();
     scheduleRetryStatusPoll(15000);
-    document.addEventListener("visibilitychange", function () { if (!document.hidden) scheduleRetryStatusPoll(0); });
+    document.addEventListener("visibilitychange", function () { if (!document.hidden && state.retryStatus && state.retryStatus.active) scheduleRetryStatusPoll(0); });
     window.setInterval(function () { if (state.tab === "conversations" && !document.hidden) loadConversations(false); }, 10000);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", build, { once: true }); else build();
