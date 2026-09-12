@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 export const EAC_VERSION = "5.3.6";
@@ -62,9 +63,26 @@ const INJECTED_PLUGINS = [
 ];
 const INJECTED_PLUGIN_SOURCE_ROOT = "C:\\Users\\sbhui\\.dsh\\profiles\\web-desktop\\node_modules";
 
+// EAC 把插件从 assets/plugins 拷进 profile 的 node_modules 时走的是
+// lib/plugin-copy.js 里的白名单（TOP_FILES / TOP_DIRS）。本地插件带的入口和子目录
+// 白名单不认识 —— dsh-client-masquerade 顶层就 require('./patches/patch-lib.js')，
+// 结果桌面上跑得好好的插件到了设备上变成「Cannot find module」并拖垮整棵插件树。
+// 这里按插件自己 package.json 声明的对外文件面（files / exports / main）放宽白名单，
+// 再逐个校验相对 require 都落在拷贝清单里；漏文件在构建期就报错，而不是等设备起不来。
+// 这份副本必须与 EAC plugin-copy.js 的 EXTRA_PACKAGE_FILES 保持一致（已含在其清单内，
+// 重复添加只是无害）。
+const EAC_EXTRA_PACKAGE_FILES = [
+  "LICENSE", "LICENSE.md", "NOTICE", "NOTICE.md",
+  "README.md", "README.zh.md", "README.zh-CN.md", "THIRD-PARTY-NOTICES.md",
+];
+
 function inside(parent, candidate) {
   const relative = path.relative(parent, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+  if (relative === "") return true;
+  // 跨盘符时 path.relative 会原样返回绝对路径（Windows: C: vs D:），
+  // 它当然不以 ".." 开头，按前缀判断会把它误当成子路径。
+  if (path.isAbsolute(relative)) return false;
+  return !relative.startsWith(`..${path.sep}`) && relative !== "..";
 }
 
 async function requireFile(file, label = file) {
@@ -130,7 +148,7 @@ async function removeMatchingDirectories(parent, predicate) {
   }
 }
 
-async function retireVisualPlugins(outputDesktop) {
+async function retireVisualPlugins(outputDesktop, pluginSourceRoot) {
   const pluginRoot = path.join(outputDesktop, "assets", "plugins");
   for (const plugin of RETIRED_BUILTIN_PLUGINS) {
     await rm(path.join(pluginRoot, plugin.directory), { recursive: true, force: true });
@@ -144,7 +162,7 @@ async function retireVisualPlugins(outputDesktop) {
   // BEFORE the registry patch below so that the freshly built payload carries
   // both the code and its registration row.
   for (const plugin of INJECTED_PLUGINS) {
-    const sourceDir = path.join(INJECTED_PLUGIN_SOURCE_ROOT, plugin.source);
+    const sourceDir = path.join(pluginSourceRoot, plugin.source);
     await requireDirectory(sourceDir, `injected plugin ${plugin.name}`);
     const packageJson = JSON.parse(await readFile(path.join(sourceDir, "package.json"), "utf8"));
     if (packageJson.name !== plugin.name) {
@@ -218,6 +236,127 @@ async function retireVisualPlugins(outputDesktop) {
   await writeFile(registryPath, updated);
 }
 
+/** 插件对外声明的文件面：files / exports / main / dsh.bundle.patch。 */
+async function pluginPublishEntries(sourceDir) {
+  const manifest = JSON.parse(await readFile(path.join(sourceDir, "package.json"), "utf8"));
+  const entries = new Set();
+  const add = (value) => {
+    if (typeof value !== "string") return;
+    const cleaned = value.trim().replace(/^\.\//u, "").replace(/\/+$/u, "");
+    if (!cleaned || cleaned.includes("*") || path.isAbsolute(cleaned)) return;
+    entries.add(cleaned);
+  };
+  for (const value of Array.isArray(manifest.files) ? manifest.files : []) add(value);
+  const collectExports = (value) => {
+    if (typeof value === "string") add(value);
+    else if (value && typeof value === "object") for (const nested of Object.values(value)) collectExports(nested);
+  };
+  collectExports(manifest.exports);
+  add(manifest.main);
+  if (manifest.dsh && manifest.dsh.bundle) add(manifest.dsh.bundle.patch);
+  return [...entries];
+}
+
+/** 定位 EAC plugin-copy.js 里的拷贝清单数组（返回闭合括号偏移与已有成员）。 */
+function pluginCopyArray(source, name) {
+  const marker = `const ${name} = [`;
+  const start = source.indexOf(marker);
+  if (start < 0) return null;
+  // 按括号配对找闭合位置，而不是找第一个 "];" —— 上游若把清单写成
+  // `[...].concat(...)`，第一个 "];" 会落在下一个数组的结尾，插入点就跑偏了。
+  let depth = 0;
+  let quote = null;
+  let index = start + marker.length - 1;
+  for (; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (character === "\\") index += 1;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") quote = character;
+    else if (character === "[") depth += 1;
+    else if (character === "]" && --depth === 0) break;
+  }
+  if (depth !== 0) return null;
+  const body = source.slice(start, index);
+  const members = new Set([...body.matchAll(/['"]([^'"]+)['"]/gu)].map((match) => match[1]));
+  return { end: index, members };
+}
+
+/**
+ * 把注入插件声明的文件面并进 EAC 的拷贝白名单。
+ * 白名单是文本补丁：数组结尾可能是 `'styles']` 也可能是空数组，插入时补逗号。
+ */
+async function widenPluginCopySet(outputDesktop) {
+  const copyPath = path.join(outputDesktop, "lib", "plugin-copy.js");
+  let source = await readFile(copyPath, "utf8");
+  const wanted = { TOP_FILES: new Set(EAC_EXTRA_PACKAGE_FILES), TOP_DIRS: new Set() };
+  for (const plugin of INJECTED_PLUGINS) {
+    const sourceDir = path.join(outputDesktop, "assets", "plugins", plugin.directory);
+    for (const entry of await pluginPublishEntries(sourceDir)) {
+      let metadata;
+      try {
+        metadata = await lstat(path.join(sourceDir, ...entry.split("/")));
+      } catch {
+        continue;
+      }
+      if (metadata.isDirectory()) wanted.TOP_DIRS.add(entry);
+      else if (metadata.isFile()) wanted.TOP_FILES.add(entry);
+    }
+  }
+  for (const name of ["TOP_FILES", "TOP_DIRS"]) {
+    const literal = pluginCopyArray(source, name);
+    if (!literal) throw new Error(`EAC plugin-copy.js has no ${name} list to widen`);
+    const missing = [...wanted[name]].filter((entry) => !literal.members.has(entry)).sort();
+    if (!missing.length) continue;
+    const head = source.slice(0, literal.end).replace(/\s+$/u, "");
+    const separator = head.endsWith(",") || head.endsWith("[") ? "" : ",";
+    const insertion = `${separator} ${missing.map((entry) => `'${entry}'`).join(", ")},`;
+    source = head + insertion + source.slice(literal.end);
+  }
+  await writeFile(copyPath, source);
+}
+
+/**
+ * 用打过补丁的 EAC 拷贝清单核对：注入插件里每个相对 require/import 的目标
+ * 都必须真的会被拷进 profile。这条校验就是本次「设备上 Cannot find module
+ * './patches/patch-lib.js'、整棵插件树加载失败」的回归闸门。
+ */
+async function validateInjectedPluginCopySet(outputDesktop) {
+  const copyLib = createRequire(import.meta.url)(path.join(outputDesktop, "lib", "plugin-copy.js"));
+  if (typeof copyLib.pluginCopyEntries !== "function") {
+    throw new Error("EAC plugin-copy.js no longer exports pluginCopyEntries");
+  }
+  const problems = [];
+  for (const plugin of INJECTED_PLUGINS) {
+    const sourceDir = path.join(outputDesktop, "assets", "plugins", plugin.directory);
+    const copied = new Set(copyLib.pluginCopyEntries(sourceDir));
+    const resolveCopied = (specifier, from) => {
+      const base = path.posix.join(path.posix.dirname(from), specifier);
+      return [base, `${base}.js`, `${base}.mjs`, `${base}.cjs`, `${base}.json`,
+        `${base}/index.js`, `${base}/index.mjs`, `${base}/index.cjs`]
+        .find((candidate) => copied.has(candidate));
+    };
+    for (const relative of [...copied].sort()) {
+      if (!/\.(?:js|mjs|cjs)$/u.test(relative)) continue;
+      const text = await readFile(path.join(sourceDir, ...relative.split("/")), "utf8");
+      const specifiers = [
+        ...text.matchAll(/\brequire\(\s*['"](\.[^'"]*)['"]\s*\)/gu),
+        ...text.matchAll(/\bimport\(\s*['"](\.[^'"]*)['"]\s*\)/gu),
+        ...text.matchAll(/\bfrom\s+['"](\.[^'"]*)['"]/gu),
+      ];
+      for (const match of specifiers) {
+        if (resolveCopied(match[1], relative)) continue;
+        problems.push(`${plugin.name}: ${relative} loads ${match[1]} that the EAC plugin copy list drops`);
+      }
+    }
+  }
+  if (problems.length) {
+    throw new Error(`Injected plugins would lose files they load at runtime:\n  ${problems.join("\n  ")}`);
+  }
+}
+
 async function pruneFiles(root, relative = "") {
   const directory = path.join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -271,6 +410,14 @@ async function validateInputs(options) {
   if (resolved.outputRoot === path.parse(resolved.outputRoot).root) {
     throw new Error(`Refusing to stage EAC at a filesystem root: ${resolved.outputRoot}`);
   }
+  // 默认取本机 web-desktop profile 的 node_modules（用户装的插件就是这个版本）；
+  // 测试用 fixture 覆盖它，避免依赖某台机器的桌面环境。
+  resolved.pluginSourceRoot = typeof options?.pluginSourceRoot === "string" && options.pluginSourceRoot.trim() !== ""
+    ? path.resolve(options.pluginSourceRoot)
+    : INJECTED_PLUGIN_SOURCE_ROOT;
+  if (inside(resolved.outputRoot, resolved.pluginSourceRoot)) {
+    throw new Error(`Injected plugin source must not live inside the EAC output: ${resolved.pluginSourceRoot}`);
+  }
   for (const name of [
     "sourceRoot",
     "overlayRoot",
@@ -306,6 +453,7 @@ async function validateInputs(options) {
   await requirePackageVersion(resolved.emnapiRuntimeRoot, "@emnapi/runtime",
     PACKAGE_VERSIONS.get("@emnapi/runtime"));
   await requirePackageVersion(resolved.tslibRoot, "tslib", PACKAGE_VERSIONS.get("tslib"));
+  await requireDirectory(resolved.pluginSourceRoot, "injected plugin source root");
   return resolved;
 }
 
@@ -388,7 +536,9 @@ export async function stageEacAndroidRuntime(options) {
   for (const packageName of ["bare-fs", "bare-path", "bare-url"]) {
     await rm(path.join(outputNodeModules, packageName, "prebuilds"), { recursive: true, force: true });
   }
-  await retireVisualPlugins(outputDesktop);
+  await retireVisualPlugins(outputDesktop, input.pluginSourceRoot);
+  await widenPluginCopySet(outputDesktop);
+  await validateInjectedPluginCopySet(outputDesktop);
   await pruneFiles(input.outputRoot);
   await validateOutput(input.outputRoot);
 }

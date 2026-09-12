@@ -94,6 +94,12 @@ Android EAC 包移除选定的 9 个桌宠及外观插件，保留输入灵动�
 （dsh-session-id-footer）与输入灵动岛（dsh-composer-dynamic-island），全部默认可用。
 旧版终端的文件管理和下载库按需初始化，状态文件轮询移到后台，共享存储权限只在选择目录时请求。
 
+设备侧把这些插件拷进 profile 时用的是上游白名单，会漏掉插件自己在 `package.json` 里声明的
+子目录 —— `dsh-client-masquerade` 的 `main` 就 `require('./patches/patch-lib.js')`，漏拷后
+整棵插件树加载失败、dsh 起不来。现在按插件声明的文件面（`files`/`exports`/`main`）放宽白名单，
+并在组装运行时逐个校验相对 `require` 都落在拷贝清单里，漏文件在构建期就会失败。子进程环境也
+改为指向 Termux 的 `etc/tls/cert.pem`，消除启动时的 OpenSSL 证书目录告警。
+
 Android 工程位于 `ZeroTermux-main/`，离线运行时准备脚本位于
 `scripts/prepare-android-runtime.ps1`。应用使用独立包名 `com.dshcli`，可以与原来的
 ZeroTermux (`com.termux`) 共存；Termux Java namespace 仍保留为 `com.termux`，

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -50,6 +51,85 @@ const INJECTED_PLUGIN_DIRS = [
   "dsh-client-masquerade",
   "dsh-session-id-footer",
 ];
+// 本机桌面 profile 里用户实际装的插件（生产 staging 的默认来源）。
+const REAL_PLUGIN_ROOT = "C:\\Users\\sbhui\\.dsh\\profiles\\web-desktop\\node_modules";
+const EXTRA_PACKAGE_FILES = [
+  "LICENSE", "LICENSE.md", "NOTICE", "NOTICE.md",
+  "README.md", "README.zh.md", "README.zh-CN.md", "THIRD-PARTY-NOTICES.md",
+];
+// EAC 把插件拷进 profile 时走 lib/plugin-copy.js 的白名单。这个 fixture 清单与上游
+// 一致（少了 patches/ 与几个入口文件），用来验证 staging 会按插件自己的 package.json
+// 放宽它 —— 真实设备上就是这里漏拷 ./patches/patch-lib.js 才导致插件树加载失败。
+const FIXTURE_TOP_FILES = [
+  "package.json", "dsh-plugin.json", "skin.json", ...EXTRA_PACKAGE_FILES,  "EAC-ADAPTATION.md", "index.js", "client.js", "recall-inject.js", "cordis.patch.yml",
+  "DESIGN.md", "FRAMING.md", "EDITORIAL.md", "BREATH.md",
+];
+const FIXTURE_TOP_DIRS = [
+  "lib", "docs", "preview", "vendor", "node_modules", "data", "assets", "runtime", "src",
+  "client", "styles",
+];
+const FIXTURE_PLUGINS = {
+  "dsh-subagent-panel": {
+    manifest: {
+      type: "module",
+      main: "lib/host.js",
+      exports: { ".": "./lib/host.js", "./client": "./lib/client.js" },
+      files: ["lib/", "cordis.patch.yml", "README.md"],
+    },
+    files: {
+      "lib/host.js": "import { roster } from './roster.js';\nexport const host = roster;\n",
+      "lib/roster.js": "export const roster = [];\n",
+      "lib/client.js": "export const client = true;\n",
+      "cordis.patch.yml": "- insert:\n    - id: subagent-panel\n      name: 'dsh-subagent-panel'\n",
+    },
+  },
+  "dsh-custom-provider-reasoning": {
+    manifest: {
+      type: "module",
+      main: "lib/index.js",
+      exports: { ".": "./lib/index.js" },
+      files: ["lib", "cordis.patch.yml", "README.md", "LICENSE"],
+    },
+    files: {
+      "lib/index.js": "export const reasoning = true;\n",
+      "cordis.patch.yml": "- insert:\n    - id: dsh-custom-provider-reasoning\n",
+    },
+  },
+  // 真机崩溃的来源：main 里 require 的是 patches/ 子目录，而白名单没有这一项。
+  "dsh-client-masquerade": {
+    manifest: {
+      main: "index.js",
+      exports: { ".": "./index.js", "./client": "./client.js", "./plugin": "./plugin.js" },
+      files: ["index.js", "client.js", "host.body.js", "client.body.js", "plugin.js",
+        "cordis.patch.yml", "patches", "README.md", "LICENSE"],
+    },
+    files: {
+      "index.js": "const lib = require('./patches/patch-lib.js');\nmodule.exports = lib;\n",
+      "client.js": "export const client = true;\n",
+      "host.body.js": "// host body\nmodule.exports = {};\n",
+      "client.body.js": "// client body\nmodule.exports = {};\n",
+      "plugin.js": "module.exports = {};\n",
+      "patches/patch-lib.js": "module.exports = require('./claude-code-fingerprint.js');\n",
+      "patches/claude-code-fingerprint.js": "module.exports = { fingerprint: true };\n",
+      "cordis.patch.yml": "- insert:\n    - id: client-masquerade\n",
+      // 未声明、也不在白名单里：不该被拷进 profile。
+      "notes/scratch.md": "internal notes\n",
+    },
+  },
+  "dsh-session-id-footer": {
+    manifest: {
+      type: "module",
+      main: "lib/index.js",
+      exports: { ".": "./lib/index.js", "./client": "./lib/client.js" },
+      files: ["lib", "cordis.patch.yml", "package.json"],
+    },
+    files: {
+      "lib/index.js": "import './client.js';\nexport const footer = true;\n",
+      "lib/client.js": "export const client = true;\n",
+      "cordis.patch.yml": "- insert:\n    - id: session-id-footer\n",
+    },
+  },
+};
 
 async function put(root, relative, contents = relative) {
   const target = path.join(root, ...relative.split("/"));
@@ -84,6 +164,18 @@ async function fixture() {
   const sharpWasmRoot = path.join(root, "sharp-wasm32");
   const emnapiRuntimeRoot = path.join(root, "emnapi-runtime");
   const tslibRoot = path.join(root, "tslib");
+  const pluginSourceRoot = path.join(root, "profile-node-modules");
+
+  // 本机桌面环境不该是测试前提：四个注入插件在这里复刻（含 masquerade 的
+  // patches/ 子目录 require）。生产默认仍读真实 profile，见 REAL_PLUGIN_ROOT。
+  for (const [directory, plugin] of Object.entries(FIXTURE_PLUGINS)) {
+    await put(pluginSourceRoot, `${directory}/package.json`, JSON.stringify({
+      name: directory, version: "9.9.9", ...plugin.manifest,
+    }, null, 2));
+    for (const [relative, contents] of Object.entries(plugin.files)) {
+      await put(pluginSourceRoot, `${directory}/${relative}`, contents);
+    }
+  }
 
   for (const file of SIDECAR_FILES) await put(sourceRoot, `sidecar/${file}`, file);
   await put(desktop, "package.json", JSON.stringify({ name: "dsh-desktop", version: EAC_VERSION }));
@@ -95,6 +187,34 @@ async function fixture() {
   await put(desktop, "vendor/kernel/kernel.tgz");
   await put(desktop, "native/desktop-host.node");
   await put(desktop, "assets/source.map");
+  await put(desktop, "lib/plugin-copy.js", [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    `const EXTRA_PACKAGE_FILES = ${JSON.stringify(EXTRA_PACKAGE_FILES)};`,
+    "exports.EXTRA_PACKAGE_FILES = EXTRA_PACKAGE_FILES;",
+    `const TOP_FILES = ${JSON.stringify(FIXTURE_TOP_FILES)}.concat(EXTRA_PACKAGE_FILES);`,
+    `const TOP_DIRS = ${JSON.stringify(FIXTURE_TOP_DIRS)};`,
+    "function pluginCopyEntries(src) {",
+    "  const seen = new Set();",
+    "  const emit = (relative) => {",
+    "    try { if (fs.statSync(path.join(src, relative)).isFile()) seen.add(relative); } catch {}",
+    "  };",
+    "  for (const name of TOP_FILES) emit(name);",
+    "  const walk = (relative) => {",
+    "    let entries;",
+    "    try { entries = fs.readdirSync(path.join(src, relative), { withFileTypes: true }); } catch { return; }",
+    "    for (const entry of entries) {",
+    "      const child = relative + '/' + entry.name;",
+    "      if (entry.isDirectory()) walk(child); else emit(child);",
+    "    }",
+    "  };",
+    "  for (const name of TOP_DIRS) {",
+    "    try { if (fs.statSync(path.join(src, name)).isDirectory()) walk(name); } catch {}",
+    "  }",
+    "  return [...seen].sort();",
+    "}",
+    "exports.pluginCopyEntries = pluginCopyEntries;",
+  ].join("\n"));
   await put(desktop, "lib/desktop/companion-sync.js", [
     'const fs = require("node:fs");',
     'const path = require("node:path");',
@@ -176,6 +296,7 @@ async function fixture() {
     sharpWasmRoot,
     emnapiRuntimeRoot,
     tslibRoot,
+    pluginSourceRoot,
   };
 }
 
@@ -188,6 +309,7 @@ function stageOptions(f) {
     sharpWasmRoot: f.sharpWasmRoot,
     emnapiRuntimeRoot: f.emnapiRuntimeRoot,
     tslibRoot: f.tslibRoot,
+    pluginSourceRoot: f.pluginSourceRoot,
   };
 }
 
@@ -320,8 +442,85 @@ test("injects the five selected plugins into the Android EAC payload and registr
   }
 });
 
-test("retirement removes old profile bundle registrations while retaining other bundles", async (t) => {
+test("widens the EAC plugin copy list so injected plugins keep what they load at runtime", async (t) => {
   const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+
+  await stageEacAndroidRuntime(stageOptions(f));
+
+  const desktop = path.join(f.outputRoot, "dsh-desktop");
+  const copySource = await readFile(path.join(desktop, "lib", "plugin-copy.js"), "utf8");
+  const section = (name) => {
+    const start = copySource.indexOf(`const ${name} = [`);
+    return copySource.slice(start, copySource.indexOf("];", start));
+  };
+  // 真机崩溃点：masquerade 的 main require 的就是 patches/ 里的文件。
+  assert.match(section("TOP_DIRS"), /'patches'/u,
+    "plugin side directories must reach the profile copy");
+  assert.match(section("TOP_FILES"), /'plugin\.js'/u);
+  assert.match(section("TOP_FILES"), /'host\.body\.js'/u);
+  assert.match(section("TOP_FILES"), /'client\.body\.js'/u);
+  // 放宽必须保持幂等：再跑一次不会重复插入。
+  assert.equal(copySource.split("'patches'").length, 2);
+
+  const copyLib = createRequire(import.meta.url)(path.join(desktop, "lib", "plugin-copy.js"));
+  const entries = new Set(copyLib.pluginCopyEntries(
+    path.join(desktop, "assets", "plugins", "dsh-client-masquerade")));
+  assert.ok(entries.has("patches/patch-lib.js"), "the require target must survive staging");
+  assert.ok(entries.has("patches/claude-code-fingerprint.js"));
+  assert.ok(entries.has("plugin.js"));
+  assert.ok(entries.has("client.js"));
+  // 插件没声明的文件仍然不进 profile：放宽的是声明面，不是整目录。
+  assert.ok(!entries.has("notes/scratch.md"));
+
+  const footerEntries = new Set(copyLib.pluginCopyEntries(
+    path.join(desktop, "assets", "plugins", "dsh-session-id-footer")));
+  assert.ok(footerEntries.has("lib/index.js"));
+  assert.ok(footerEntries.has("cordis.patch.yml"));
+});
+
+test("refuses an injected plugin that loads a file its manifest does not publish", async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+
+  // index.js 是声明过的，它 require 的 helper 没有出现在 package.json 的 files 里：
+  // npm 不会发这个文件，profile 也不会拷 —— 必须在构建期就拦下来。
+  await put(f.pluginSourceRoot, "dsh-client-masquerade/secret/helper.js", "module.exports = {};\n");
+  await put(f.pluginSourceRoot, "dsh-client-masquerade/index.js",
+    "module.exports = require('./secret/helper.js');\n");
+
+  await assert.rejects(stageEacAndroidRuntime(stageOptions(f)),
+    /secret\/helper\.js/u);
+});
+
+test("the installed desktop plugins keep every runtime require through staging", async (t) => {
+  if (!existsSync(REAL_PLUGIN_ROOT)) {
+    t.skip(`no desktop profile at ${REAL_PLUGIN_ROOT}`);
+    return;
+  }
+  const f = await fixture();
+  t.after(() => rm(f.root, { recursive: true, force: true }));
+
+  // 生产默认来源：用户桌面 profile 里装的那一份（"要用我装的"）。
+  await stageEacAndroidRuntime({ ...stageOptions(f), pluginSourceRoot: REAL_PLUGIN_ROOT });
+
+  const desktop = path.join(f.outputRoot, "dsh-desktop");
+  const copyLib = createRequire(import.meta.url)(path.join(desktop, "lib", "plugin-copy.js"));
+  for (const directory of INJECTED_PLUGIN_DIRS) {
+    const pluginDir = path.join(desktop, "assets", "plugins", directory);
+    const entries = new Set(copyLib.pluginCopyEntries(pluginDir));
+    const manifest = JSON.parse(await readFile(path.join(pluginDir, "package.json"), "utf8"));
+    assert.ok(entries.has("package.json"), `${directory} manifest must be staged`);
+    const main = String(manifest.main ?? "index.js").replace(/^\.\//u, "");
+    assert.ok(entries.has(main), `${directory} main (${main}) must be staged`);
+  }
+  const masquerade = new Set(copyLib.pluginCopyEntries(
+    path.join(desktop, "assets", "plugins", "dsh-client-masquerade")));
+  assert.ok(masquerade.has("patches/patch-lib.js"),
+    "the file the device could not find must be staged for the profile copy");
+});
+
+test("retirement removes old profile bundle registrations while retaining other bundles", async (t) => {  const f = await fixture();
   t.after(() => rm(f.root, { recursive: true, force: true }));
   await stageEacAndroidRuntime(stageOptions(f));
   const profile = path.join(f.root, "profile");
