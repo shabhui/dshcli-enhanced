@@ -47,7 +47,9 @@ if (!(Test-Path -LiteralPath $tar)) {
     throw "Windows bsdtar not found at $tar"
 }
 $gitTar = Join-Path $env:ProgramFiles 'Git\usr\bin\tar.exe'
-$eacLocalCache = 'D:\cache\eac-linux\eac-5.3.6-amd64.deb'
+# 默认缓存落在系统临时目录，可用 PASEO_EAC_DEB_CACHE 覆盖；这里刻意不写死
+# 某台机器的盘符 —— 这个脚本会随构建产物一起分发。
+$eacLocalCache = Join-Path ([System.IO.Path]::GetTempPath()) "eac-linux\$eacDebName"
 $legacyPackageName = 'com.termux'
 $standalonePackageName = 'com.dshcli'
 $latin1 = [System.Text.Encoding]::GetEncoding(28591)

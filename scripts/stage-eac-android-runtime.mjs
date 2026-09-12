@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
@@ -61,7 +62,11 @@ const INJECTED_PLUGINS = [
   { id: "client-masquerade", name: "dsh-client-masquerade", directory: "dsh-client-masquerade", source: "dsh-client-masquerade" },
   { id: "session-id-footer", name: "dsh-session-id-footer", directory: "dsh-session-id-footer", source: "dsh-session-id-footer" },
 ];
-const INJECTED_PLUGIN_SOURCE_ROOT = "C:\\Users\\sbhui\\.dsh\\profiles\\web-desktop\\node_modules";
+// 本地插件的来源：默认取当前用户 web-desktop profile 的 node_modules，可用
+// PASEO_PLUGIN_SOURCE_ROOT 覆盖。刻意不写死某台机器的绝对路径 —— 这个脚本会随
+// 构建产物一起分发，写死用户名/盘符等于把本机信息带进 APK。
+const INJECTED_PLUGIN_SOURCE_ROOT = process.env.PASEO_PLUGIN_SOURCE_ROOT?.trim() ||
+  path.join(os.homedir(), ".dsh", "profiles", "web-desktop", "node_modules");
 
 // EAC 把插件从 assets/plugins 拷进 profile 的 node_modules 时走的是
 // lib/plugin-copy.js 里的白名单（TOP_FILES / TOP_DIRS）。本地插件带的入口和子目录

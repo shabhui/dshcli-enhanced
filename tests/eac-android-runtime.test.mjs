@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -51,8 +51,10 @@ const INJECTED_PLUGIN_DIRS = [
   "dsh-client-masquerade",
   "dsh-session-id-footer",
 ];
-// 本机桌面 profile 里用户实际装的插件（生产 staging 的默认来源）。
-const REAL_PLUGIN_ROOT = "C:\\Users\\sbhui\\.dsh\\profiles\\web-desktop\\node_modules";
+// 本机桌面 profile 里用户实际装的插件（生产 staging 的默认来源）。与脚本一样按
+// 当前用户解析，可被 PASEO_PLUGIN_SOURCE_ROOT 覆盖；找不到时该用例自行跳过。
+const REAL_PLUGIN_ROOT = process.env.PASEO_PLUGIN_SOURCE_ROOT?.trim() ||
+  path.join(homedir(), ".dsh", "profiles", "web-desktop", "node_modules");
 const EXTRA_PACKAGE_FILES = [
   "LICENSE", "LICENSE.md", "NOTICE", "NOTICE.md",
   "README.md", "README.zh.md", "README.zh-CN.md", "THIRD-PARTY-NOTICES.md",
